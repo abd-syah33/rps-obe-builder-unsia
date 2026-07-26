@@ -12,6 +12,8 @@ env/
 # Konfigurasi berisi API key asli — JANGAN pernah di-commit.
 # Yang ikut ter-commit hanya template-nya: config/gemini_default.txt.example
 config/gemini_default.txt
+.agent/skills
+.claude/skills
 
 # OS/editor
 .DS_Store
