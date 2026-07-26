@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Konfigurasi berisi API key asli — JANGAN pernah di-commit.
+# Yang ikut ter-commit hanya template-nya: config/gemini_default.txt.example
+config/gemini_default.txt
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# File progres/pratinjau yang mungkin diunduh ke folder ini saat testing lokal
+progres_*.xlsx
+RPS_*.xlsx
+RPS_*.pdf
