@@ -13,6 +13,10 @@ env/
 # Yang ikut ter-commit hanya template-nya: config/gemini_default.txt.example
 config/gemini_default.txt
 
+# Nama pejabat (personalisasi lokal per institusi) — yang ikut ter-commit
+# hanya template-nya: config/pejabat.txt.example
+config/pejabat.txt
+
 # OS/editor
 .DS_Store
 .vscode/

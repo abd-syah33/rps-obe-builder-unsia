@@ -1,0 +1,19 @@
+# Konfigurasi Nama Pejabat untuk Blok Validasi (tanda tangan) Dokumen RPS
+#
+# Nama-nama di sini akan otomatis mengisi field terkait saat Dosen membuka
+# aplikasi, TAPI tetap bisa diedit manual di tab "Pratinjau & Ekspor" kalau
+# perlu diubah untuk RPS tertentu.
+#
+# Format: KEY=VALUE, satu baris per pengaturan. Baris yang diawali "#" diabaikan.
+
+# Kepala Biro Penjaminan Mutu — berlaku untuk SELURUH prodi/universitas (satu nama saja)
+KABIRO_PENJAMINAN_MUTU=
+
+# Ketua Prodi — satu baris per Program Studi.
+# PENTING: bagian setelah "KAPRODI_" harus PERSIS SAMA dengan nama file
+# Program Studi di folder data/ (tanpa ".xlsx"). Contoh kalau ada file
+# "data/Informatika PJJ S1.xlsx", baris di bawah ini yang akan dipakai:
+KAPRODI_Informatika PJJ S1=
+
+# Tambahkan baris serupa untuk tiap Prodi lain yang ada di folder data/, misal:
+# KAPRODI_Sistem Informasi PJJ S1=Nama Ketua Prodi SI

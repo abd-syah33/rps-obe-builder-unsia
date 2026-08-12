@@ -3,7 +3,7 @@
 Ekspor RPS ke PDF menggunakan reportlab.
 Layout mengikuti struktur dokumen RPS asli UNSIA: satu tabel informasi menyatu
 (Program Studi s/d Modus Pembelajaran), lalu tabel 16 pertemuan terpisah,
-lalu daftar referensi — sesuai urutan pada dokumen resmi.
+lalu daftar referensi, sesuai urutan pada dokumen resmi.
 """
 
 import io
@@ -35,7 +35,7 @@ HEADER_BLUE = colors.HexColor("#B7DDE8")  # warna asli header tabel RPS UNSIA
 GRID_COLOR = colors.HexColor("#000000")
 
 # --------------------------------------------------------------------------
-# Ukuran halaman & lebar tersedia — semua tabel dihitung PROPORSIONAL terhadap
+# Ukuran halaman & lebar tersedia. Semua tabel dihitung PROPORSIONAL terhadap
 # ini, sehingga tidak akan pernah ada tabel yang melebihi lebar halaman.
 # --------------------------------------------------------------------------
 MARGIN = 1.3 * cm
@@ -81,7 +81,7 @@ def base_table_style(spans=None):
 
 
 # ============================================================================
-# TABEL INFORMASI UTAMA (menyatu — meniru struktur dokumen RPS asli)
+# TABEL INFORMASI UTAMA (menyatu, meniru struktur dokumen RPS asli)
 # ============================================================================
 def build_info_table(prodi, mk_row, cpl_df, info_umum, cpmk_data, komponen_data, bobot_kategori):
     col_w = cw(1.3, 1.1, 1.3, 1.9)  # label kiri = label kanan; kode/nilai kiri dipersempit
@@ -190,7 +190,7 @@ def build_info_table(prodi, mk_row, cpl_df, info_umum, cpmk_data, komponen_data,
     blue_cells += [(0, r)]
     r += 1
 
-    rows.append([P("Modus Pembelajaran", label_style), P(info_umum.get("modus", "-")), P(""), P("")])
+    rows.append([P("Perangkat Lunak/Laboratorium", label_style), P(info_umum.get("modus", "-")), P(""), P("")])
     spans.append(((1, r), (3, r)))
     blue_cells += [(0, r)]
     r += 1
@@ -304,7 +304,7 @@ KOMPONEN_PENJELASAN = [
      "dengan rancangan materi/topik pembelajaran dari pertemuan ke-1 hingga ke-7. Bentuk UTS dapat berupa ujian "
      "tertulis atau presentasi tugas mandiri atau tugas kelompok dan lain-lain yang juga menyesuaikan dengan "
      "metode pembelajaran. Bobot nilai UTS yang diberikan adalah sebesar 20%."),
-    ("UAS (PbL) — Menghasilkan produk (desain produk/hasil konfigurasi)",
+    ("UAS (PbL): Menghasilkan produk (desain produk/hasil konfigurasi)",
      "idealnya real case lapangan. UAS dilakukan pada pertemuan minggu ke-16 dari keseluruhan total pertemuan. "
      "UAS merupakan asesmen atas kemampuan akhir mahasiswa sesuai dengan rancangan materi/topik pembelajaran "
      "dari pertemuan ke-9 hingga ke-15. Bentuk UAS dapat berupa ujian tertulis atau presentasi tugas mandiri "
@@ -372,7 +372,7 @@ def build_appendix_flowables(info_umum):
     flow.append(Paragraph("Pengertian 1 SKS dalam Bentuk Pembelajaran", section_style))
     sks_data = [[P("", label_style), P("Durasi (Jam)", label_style)]]
     for kode, judul, detail, durasi in SKS_ROWS:
-        sks_data.append([P(f"{kode}. {judul} — {detail}"), P(durasi)])
+        sks_data.append([P(f"{kode}. {judul}: {detail}"), P(durasi)])
     t_sks = Table(sks_data, colWidths=cw(6, 1), repeatRows=1)
     t_sks.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), HEADER_BLUE),
@@ -407,7 +407,7 @@ def build_appendix_flowables(info_umum):
         "Proses penilaian pada mata kuliah ini dibedakan dalam 4 komponen, di antaranya adalah sebagai berikut:",
         small_style))
     for label, teks in KOMPONEN_PENJELASAN:
-        flow.append(Paragraph(f"<b>{label}</b> — {teks}", ParagraphStyle(
+        flow.append(Paragraph(f"<b>{label}</b>: {teks}", ParagraphStyle(
             "komp_p", parent=small_style, spaceBefore=4, spaceAfter=4, leftIndent=10)))
 
     flow.append(PageBreak())
@@ -508,7 +508,7 @@ def build_pdf(prodi, mk_row, cpl_df, info_umum, cpmk_data,
     story.append(build_info_table(prodi, mk_row, cpl_df, info_umum, cpmk_data, komponen_data, bobot_kategori))
 
     # --- Tabel 16 Pertemuan ---
-    story.append(PageBreak())
+    story.append(Spacer(1, 18))
     story.append(Paragraph("Rencana Pembelajaran per Minggu", section_style))
     story.append(build_pertemuan_table(pertemuan_data))
 
@@ -519,7 +519,7 @@ def build_pdf(prodi, mk_row, cpl_df, info_umum, cpmk_data,
         for i, ref in enumerate(referensi_data, start=1):
             story.append(Paragraph(f"{i}. {ref['sitasi']}", ref_style))
     else:
-        story.append(Paragraph("—", ref_style))
+        story.append(Paragraph("(belum diisi)", ref_style))
 
     # --- Bagian baku setelah Referensi (Catatan s/d blok validasi) ---
     story.extend(build_appendix_flowables(info_umum))

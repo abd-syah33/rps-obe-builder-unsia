@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Aplikasi Input RPS (Rencana Pembelajaran Semester) — UNSIA
+Aplikasi Input RPS (Rencana Pembelajaran Semester) untuk UNSIA
 
 Cara menjalankan:
     pip install -r requirements.txt
@@ -27,8 +27,6 @@ import pandas as pd
 import streamlit as st
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 try:
     from google import genai
@@ -41,6 +39,7 @@ from pdf_export import (
     build_pdf, with_code, CATATAN_POINTS, SKS_ROWS, BLOOM_TABLE, METODE_TABLE,
     BENTUK_TABLE, KOMPONEN_PENJELASAN, RUBRIK_ROWS,
 )
+from docx_export import build_docx
 
 # --------------------------------------------------------------------------
 # Konstanta
@@ -70,6 +69,32 @@ def load_default_gemini_config():
         pass
     return result
 
+
+PEJABAT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "pejabat.txt")
+
+
+def load_pejabat_config():
+    """Baca config/pejabat.txt -> {'kabiro': ..., 'kaprodi': {nama_prodi: nama_kaprodi}}."""
+    result = {"kabiro": "", "kaprodi": {}}
+    if not os.path.exists(PEJABAT_CONFIG_PATH):
+        return result
+    try:
+        with open(PEJABAT_CONFIG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key == "KABIRO_PENJAMINAN_MUTU" and value:
+                    result["kabiro"] = value
+                elif key.startswith("KAPRODI_") and value:
+                    nama_prodi = key[len("KAPRODI_"):]
+                    result["kaprodi"][nama_prodi] = value
+    except Exception:
+        pass
+    return result
+
 BLOOM_LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6"]
 METODE_OPTIONS = ["SGD", "RPlS", "DL", "SDL", "CoL", "CbL", "CtL", "PjBL", "PBL"]
 BENTUK_OPTIONS = ["EL-1", "EL-2", "EL-3", "EL-4", "EL-5", "EL-6", "EL-7", "EL-8"]
@@ -95,7 +120,7 @@ BENTUK_INFO = {
 
 
 def info_tooltip(info_dict):
-    return "  \n".join(f"**{k}** — {v}" for k, v in info_dict.items())
+    return "  \n".join(f"**{k}**: {v}" for k, v in info_dict.items())
 
 
 N_CPL_WAJIB = 5
@@ -104,11 +129,11 @@ KATEGORI_PENILAIAN = ["Kehadiran dan Sikap", "Tugas", "UTS", "UAS"]
 BOBOT_KATEGORI = {"Kehadiran dan Sikap": 30, "Tugas": 20, "UTS": 20, "UAS": 30}
 HEADER_BLUE = "#B7DDE8"  # warna asli header tabel RPS UNSIA
 
-st.set_page_config(page_title="RPS Builder — UNSIA", layout="wide")
+st.set_page_config(page_title="RPS Builder · UNSIA", layout="wide")
 
 
 # --------------------------------------------------------------------------
-# Asisten AI (Google Gemini) — opsional, menyarankan draf isi 1 pertemuan
+# Asisten AI (Google Gemini, opsional) - menyarankan draf isi 1 pertemuan
 # --------------------------------------------------------------------------
 def get_ai_suggestion(nama_mk, deskripsi_mk, cpmk_desc, sub_cpmk_desc, minggu, api_key, model_name="gemini-2.0-flash"):
     client = genai.Client(api_key=api_key)
@@ -120,15 +145,17 @@ Konteks pertemuan minggu ke-{minggu} dari 16 minggu perkuliahan:
 - CPMK terkait: {cpmk_desc or "(belum diisi)"}
 - Sub-CPMK (jika sudah diisi dosen): {sub_cpmk_desc or "(belum diisi)"}
 
-Gunakan deskripsi mata kuliah dan CPMK di atas sebagai konteks utama supaya saran yang diberikan
-relevan dan konsisten dengan arah keseluruhan mata kuliah, bukan generik.
+Gunakan deskripsi mata kuliah, CPMK, DAN Sub-CPMK di atas sebagai konteks utama supaya saran
+yang diberikan relevan dan konsisten dengan arah keseluruhan mata kuliah, bukan generik.
 
 Sarankan draf singkat, konkret, dan realistis untuk SATU pertemuan ini saja (bukan seluruh semester),
 dalam Bahasa Indonesia:
 - materi: poin-poin utama materi pembelajaran minggu ini (boleh berupa daftar singkat)
 - tugas: deskripsi tugas/quiz/assignment yang sesuai untuk pertemuan ini
 - kriteria: kriteria penilaian untuk tugas tersebut
-- indikator: indikator penilaian yang terukur"""
+- indikator: indikator penilaian yang terukur
+- bloom: 1-2 level Bloom's Taxonomy yang paling sesuai dengan kedalaman pertemuan ini
+- bentuk: 1-2 bentuk pembelajaran online yang paling sesuai dengan materi/tugas yang disarankan"""
 
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -139,8 +166,10 @@ dalam Bahasa Indonesia:
                 "tugas": {"type": "string"},
                 "kriteria": {"type": "string"},
                 "indikator": {"type": "string"},
+                "bloom": {"type": "array", "items": {"type": "string", "enum": BLOOM_LEVELS}},
+                "bentuk": {"type": "array", "items": {"type": "string", "enum": BENTUK_OPTIONS}},
             },
-            "required": ["materi", "tugas", "kriteria", "indikator"],
+            "required": ["materi", "tugas", "kriteria", "indikator", "bloom", "bentuk"],
         },
     )
     response = client.models.generate_content(model=model_name, contents=prompt, config=config)
@@ -235,6 +264,8 @@ def pertemuan_to_df(pertemuan_data):
 def df_to_pertemuan(df):
     data = {}
     for _, row in df.iterrows():
+        if pd.isna(row["Minggu"]):
+            continue  # lewati baris kosong (mis. sisa baris terpakai dari Excel)
         m = int(row["Minggu"])
         cpmk_ref = row["CPMK Ref"]
         data[m] = {
@@ -250,11 +281,15 @@ def df_to_pertemuan(df):
             "referensi": row["Referensi"] or "",
             "bobot": int(row["Bobot (%)"]) if pd.notna(row["Bobot (%)"]) else 0,
         }
+    # pastikan minggu 1-16 selalu ada meski file yang diimpor tidak lengkap
+    for m in range(1, N_MINGGU + 1):
+        if m not in data:
+            data[m] = default_pertemuan()[m]
     return data
 
 
 # --------------------------------------------------------------------------
-# Simpan / muat progres — format Excel (bukan JSON, supaya bisa dibuka & dicek
+# Simpan / muat progres, format Excel (bukan JSON, supaya bisa dibuka & dicek
 # manual oleh dosen di Excel biasa)
 # --------------------------------------------------------------------------
 def serialize_progress_excel(mk_row):
@@ -266,10 +301,10 @@ def serialize_progress_excel(mk_row):
     ws_meta.append(["prodi_sel", st.session_state.prodi_sel])
     ws_meta.append(["mk_sel", st.session_state.mk_sel])
     info = st.session_state.info_umum
-    ws_meta.append(["dosen_pengampu", info["dosen_pengampu"]])
-    ws_meta.append(["deskripsi_mk", info["deskripsi_mk"]])
-    ws_meta.append(["media", info["media"]])
-    ws_meta.append(["modus", info["modus"]])
+    for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk", "media", "modus",
+                "nama_kaprodi", "nama_koordinator", "nama_penyusun", "nama_biro_pjm",
+                "tanggal_dokumen"):
+        ws_meta.append([key, info.get(key, "")])
 
     ws_cpl = wb.create_sheet("CPL_Selected")
     ws_cpl.append(["Kode CPL"])
@@ -312,12 +347,13 @@ def load_progress_excel(uploaded_file):
         meta = {row[0]: row[1] for row in ws.iter_rows(min_row=2, values_only=True) if row[0]}
         st.session_state.prodi_sel = meta.get("prodi_sel")
         st.session_state.mk_sel = meta.get("mk_sel")
-        st.session_state.info_umum = {
-            "dosen_pengampu": meta.get("dosen_pengampu") or "",
-            "deskripsi_mk": meta.get("deskripsi_mk") or "",
-            "media": meta.get("media") or "",
-            "modus": meta.get("modus") or "",
-        }
+        # Perbarui info_umum field-per-field (bukan mengganti seluruh dict), supaya field
+        # yang belum ada di file progres lama (mis. ditambahkan di versi aplikasi yang lebih
+        # baru) tidak sampai hilang dan menyebabkan KeyError di tempat lain.
+        for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk", "media", "modus",
+                    "nama_kaprodi", "nama_koordinator", "nama_penyusun", "nama_biro_pjm",
+                    "tanggal_dokumen"):
+            st.session_state.info_umum[key] = meta.get(key) or st.session_state.info_umum.get(key, "")
 
     if "CPL_Selected" in wb.sheetnames:
         ws = wb["CPL_Selected"]
@@ -358,264 +394,6 @@ def load_progress_excel(uploaded_file):
             st.session_state.pertemuan_data = df_to_pertemuan(df)
 
 
-# --------------------------------------------------------------------------
-# Export ke Excel (struktur menyatu — meniru dokumen RPS asli)
-# --------------------------------------------------------------------------
-def export_to_excel(mk_row, cpl_df):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "RPS"
-
-    header_fill = PatternFill("solid", fgColor="B7DDE8")
-    bold = Font(bold=True)
-    border = Border(*(Side(style="thin", color="D9D9D9"),) * 4)
-    wrap = Alignment(wrap_text=True, vertical="top")
-    center = Alignment(horizontal="center", vertical="center")
-    title_font = Font(bold=True, size=14)
-    section_font = Font(bold=True, size=12, color="1E3A5F")
-
-    info = st.session_state.info_umum
-    cpmk_data = st.session_state.cpmk_data
-    komponen_data = st.session_state.komponen_data
-
-    def set_cell(row, col, value, fill=None, font=None, merge_to_col=None):
-        c = ws.cell(row=row, column=col, value=value)
-        c.border = border
-        c.alignment = wrap
-        if fill:
-            c.fill = fill
-        if font:
-            c.font = font
-        if merge_to_col:
-            ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=merge_to_col)
-            for cc in range(col + 1, merge_to_col + 1):
-                ws.cell(row=row, column=cc).border = border
-        return c
-
-    r = 1
-    ws.cell(row=r, column=1, value="RENCANA PEMBELAJARAN SEMESTER (RPS)").font = title_font
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-    r += 2
-
-    # --- 4 baris identitas MK ---
-    set_cell(r, 1, "Program Studi", fill=header_fill, font=bold)
-    set_cell(r, 2, st.session_state.prodi_sel)
-    set_cell(r, 3, "Semester", fill=header_fill, font=bold)
-    set_cell(r, 4, mk_row["Semester"])
-    r += 1
-    set_cell(r, 1, "Mata Kuliah", fill=header_fill, font=bold)
-    set_cell(r, 2, mk_row["Nama Mata Kuliah"])
-    set_cell(r, 3, "Beban SKS", fill=header_fill, font=bold)
-    set_cell(r, 4, f'{mk_row["SKS"]} SKS')
-    r += 1
-    set_cell(r, 1, "Ranah Topik", fill=header_fill, font=bold)
-    set_cell(r, 2, mk_row.get("Ranah Topik", "-"))
-    set_cell(r, 3, "Dosen Pengampu (Koordinator & Anggota)", fill=header_fill, font=bold)
-    set_cell(r, 4, info["dosen_pengampu"])
-    r += 1
-    set_cell(r, 1, "Kode Mata Kuliah", fill=header_fill, font=bold)
-    set_cell(r, 2, mk_row["Kode MK"], merge_to_col=4)
-    r += 1
-
-    # --- CPL ---
-    cpl_selected = [cpmk_data[i]["cpl_kode"] for i in range(1, 6)]
-    seen = set()
-    cpl_rows = []
-    for kode in cpl_selected:
-        if kode in seen:
-            continue
-        seen.add(kode)
-        desk = cpl_df.loc[cpl_df["Kode CPL"] == kode, "Deskripsi CPL"]
-        cpl_rows.append((kode, desk.values[0] if len(desk) else ""))
-    cpl_start = r
-    for idx, (kode, desk) in enumerate(cpl_rows):
-        label = "Capaian Pembelajaran Lulusan (CPL)" if idx == 0 else ""
-        set_cell(r, 1, label, fill=header_fill, font=bold)
-        set_cell(r, 2, kode)
-        set_cell(r, 3, desk, merge_to_col=4)
-        r += 1
-    if len(cpl_rows) > 1:
-        ws.merge_cells(start_row=cpl_start, start_column=1, end_row=cpl_start + len(cpl_rows) - 1, end_column=1)
-
-    # --- CPMK ---
-    cpmk_start = r
-    for i in range(1, 6):
-        c = cpmk_data[i]
-        label = "Capaian Pembelajaran Mata Kuliah (CP-MK)" if i == 1 else ""
-        set_cell(r, 1, label, fill=header_fill, font=bold)
-        set_cell(r, 2, f"CPMK-{i}")
-        set_cell(r, 3, with_code(c["deskripsi"], c["cpl_kode"]), merge_to_col=4)
-        r += 1
-    ws.merge_cells(start_row=cpmk_start, start_column=1, end_row=cpmk_start + 4, end_column=1)
-
-    # --- Deskripsi Mata Kuliah ---
-    set_cell(r, 1, "Deskripsi Mata Kuliah", fill=header_fill, font=bold)
-    set_cell(r, 2, info["deskripsi_mk"], merge_to_col=4)
-    r += 1
-
-    # --- Komponen Penilaian: tabel ceklist (CPMK x kategori) + baris bobot ---
-    komp_start = r
-    kategori_list = list(BOBOT_KATEGORI.keys())
-    n_kat = len(kategori_list)
-    # header kategori di baris pertama komponen (kolom B dst, dalam batas 4 kolom
-    # tabel utama kita satukan jadi teks agar tetap di dalam tabel utama)
-    set_cell(r, 1, "Komponen Penilaian", fill=header_fill, font=bold)
-    header_line = " | ".join(kategori_list)
-    set_cell(r, 2, "CPMK", font=bold)
-    set_cell(r, 3, header_line, font=bold, merge_to_col=4)
-    r += 1
-    for i in range(1, 6):
-        cpmk_kat = komponen_data.get(i)
-        marks = " | ".join("\u2713" if k == cpmk_kat else "\u00b7" for k in kategori_list)
-        set_cell(r, 1, "")
-        set_cell(r, 2, f"CPMK-{i}")
-        c3 = set_cell(r, 3, marks, merge_to_col=4)
-        c3.alignment = Alignment(horizontal="center", vertical="center")
-        r += 1
-    set_cell(r, 1, "")
-    set_cell(r, 2, "Bobot", font=bold)
-    bobot_line = " | ".join(f"{k} {v}%" for k, v in BOBOT_KATEGORI.items())
-    set_cell(r, 3, bobot_line, font=bold, merge_to_col=4)
-    r += 1
-    ws.merge_cells(start_row=komp_start, start_column=1, end_row=r - 1, end_column=1)
-
-    # --- Media & Modus Pembelajaran ---
-    set_cell(r, 1, "Media Pembelajaran", fill=header_fill, font=bold)
-    set_cell(r, 2, info["media"], merge_to_col=4)
-    r += 1
-    set_cell(r, 1, "Modus Pembelajaran", fill=header_fill, font=bold)
-    set_cell(r, 2, info["modus"], merge_to_col=4)
-    r += 2
-
-    # --- Tabel 16 Pertemuan ---
-    ws.cell(row=r, column=1, value="Rencana Pembelajaran per Minggu").font = section_font
-    r += 1
-    headers = ["Minggu", "Kemampuan Akhir (Sub-CPMK)", "Bloom's Taxonomy", "Materi Pembelajaran",
-               "Metode Pembelajaran", "Bentuk Pembelajaran Online", "Deskripsi Quiz/Tugas/Assignment",
-               "Kriteria Penilaian", "Indikator Penilaian", "Referensi", "Bobot Penilaian (%)"]
-    for c_i, h in enumerate(headers, start=1):
-        cc = ws.cell(row=r, column=c_i, value=h)
-        cc.fill = header_fill
-        cc.font = bold
-        cc.border = border
-        cc.alignment = wrap
-    r += 1
-    for m in range(1, N_MINGGU + 1):
-        p = st.session_state.pertemuan_data[m]
-        sub_text = with_code(p.get("sub_cpmk_desc", ""), p.get("cpmk_ref"))
-        vals = [m, sub_text, ", ".join(p["bloom"]), p["materi"], ", ".join(p["metode"]),
-                ", ".join(p["bentuk"]), p["tugas"], p["kriteria"], p["indikator"],
-                p["referensi"], p["bobot"]]
-        for c_i, v in enumerate(vals, start=1):
-            cc = ws.cell(row=r, column=c_i, value=v)
-            cc.border = border
-            cc.alignment = wrap
-        r += 1
-    r += 1
-
-    # --- Referensi ---
-    ws.cell(row=r, column=1, value="Referensi").font = section_font
-    r += 1
-    for i, ref in enumerate(st.session_state.referensi_data, start=1):
-        ws.cell(row=r, column=1, value=f"{i}. {ref['sitasi']}").alignment = wrap
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-        r += 1
-    r += 1
-
-    # --- Catatan ---
-    ws.cell(row=r, column=1, value="Catatan").font = section_font
-    r += 1
-    for i, point in enumerate(CATATAN_POINTS, start=1):
-        ws.cell(row=r, column=1, value=f"{i}. {point}").alignment = wrap
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-        r += 1
-    r += 1
-
-    # --- Pengertian 1 SKS ---
-    ws.cell(row=r, column=1, value="Pengertian 1 SKS dalam Bentuk Pembelajaran").font = section_font
-    r += 1
-    set_cell(r, 1, "", fill=header_fill, merge_to_col=3)
-    set_cell(r, 4, "Durasi (Jam)", fill=header_fill, font=bold)
-    r += 1
-    for kode, judul, detail, durasi in SKS_ROWS:
-        set_cell(r, 1, f"{kode}. {judul} — {detail}", merge_to_col=3)
-        set_cell(r, 4, durasi)
-        r += 1
-    r += 1
-
-    # --- Legenda Bloom's / Metode / Bentuk ---
-    ws.cell(row=r, column=1, value="Legenda Bloom's Taxonomy, Metode & Bentuk Pembelajaran").font = section_font
-    r += 1
-    set_cell(r, 1, "Bloom's Taxonomy", fill=header_fill, font=bold, merge_to_col=2)
-    set_cell(r, 3, "Metode Pembelajaran SCL", fill=header_fill, font=bold)
-    set_cell(r, 4, "Bentuk Pembelajaran On-Line", fill=header_fill, font=bold)
-    r += 1
-    max_legend_rows = max(len(BLOOM_TABLE), len(METODE_TABLE), len(BENTUK_TABLE))
-    for i in range(max_legend_rows):
-        bloom_txt = f"{BLOOM_TABLE[i][1]} ({BLOOM_TABLE[i][2]})" if i < len(BLOOM_TABLE) else ""
-        metode_txt = f"{METODE_TABLE[i][1]} ({METODE_TABLE[i][2]})" if i < len(METODE_TABLE) else ""
-        bentuk_txt = f"{BENTUK_TABLE[i][1]} ({BENTUK_TABLE[i][2]})" if i < len(BENTUK_TABLE) else ""
-        set_cell(r, 1, bloom_txt, merge_to_col=2)
-        set_cell(r, 3, metode_txt)
-        set_cell(r, 4, bentuk_txt)
-        r += 1
-    r += 1
-
-    # --- Penjelasan Komponen Penilaian ---
-    ws.cell(row=r, column=1, value="Penjelasan Komponen Penilaian").font = section_font
-    r += 1
-    ws.cell(row=r, column=1,
-            value="Proses penilaian pada mata kuliah ini dibedakan dalam 4 komponen, di antaranya:").alignment = wrap
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-    r += 1
-    for label, teks in KOMPONEN_PENJELASAN:
-        ws.cell(row=r, column=1, value=f"{label} — {teks}").alignment = wrap
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-        r += 1
-    r += 1
-
-    # --- Rubrik Penilaian ---
-    ws.cell(row=r, column=1, value="Rubrik Penilaian").font = section_font
-    r += 1
-    set_cell(r, 1, "Jenjang", fill=header_fill, font=bold)
-    set_cell(r, 2, "Angka/Skor", fill=header_fill, font=bold)
-    set_cell(r, 3, "Deskripsi/Indikator Kinerja", fill=header_fill, font=bold, merge_to_col=4)
-    r += 1
-    for jenjang, skor, desk in RUBRIK_ROWS:
-        set_cell(r, 1, jenjang)
-        set_cell(r, 2, skor)
-        set_cell(r, 3, desk, merge_to_col=4)
-        r += 1
-    r += 2
-
-    # --- Blok Validasi (nama diisi manual, tanpa QR) ---
-    tgl = info.get("tanggal_dokumen") or "…………………"
-    set_cell(r, 1, f"Disetujui,\nTgl: {tgl}", fill=header_fill, font=bold)
-    set_cell(r, 2, f"Diperiksa,\nTgl: {tgl}", fill=header_fill, font=bold)
-    set_cell(r, 3, f"Dibuat,\nTgl: {tgl}", fill=header_fill, font=bold, merge_to_col=4)
-    r += 1
-    set_cell(r, 1, "Ketua Prodi")
-    set_cell(r, 2, "Koordinator Mata Kuliah/Bidang Keahlian")
-    set_cell(r, 3, "Dosen yang bersangkutan", merge_to_col=4)
-    r += 3
-    set_cell(r, 1, info.get("nama_kaprodi") or "…………………………")
-    set_cell(r, 2, info.get("nama_koordinator") or "…………………………")
-    set_cell(r, 3, info.get("nama_penyusun") or "…………………………", merge_to_col=4)
-    r += 2
-    set_cell(r, 1, "Periksa: Biro Penjaminan Mutu", fill=header_fill, font=bold, merge_to_col=4)
-    r += 3
-    set_cell(r, 1, info.get("nama_biro_pjm") or "…………………………", merge_to_col=4)
-    r += 1
-
-    widths = [22, 18, 14, 34, 16, 18, 26, 20, 20, 10, 10]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf
-
 
 # --------------------------------------------------------------------------
 # UI
@@ -651,9 +429,21 @@ with st.sidebar:
     )
 
     if mk_sel_name != st.session_state.mk_sel:
+        new_mk_row = mk_df[mk_df["Nama Mata Kuliah"] == mk_sel_name].iloc[0]
+        raw_dp = new_mk_row.get("Dosen Pengembang", "")
+        dosen_pengembang = "" if pd.isna(raw_dp) else str(raw_dp).strip()
+
         reset_rps_state()
         st.session_state.prodi_sel = prodi_sel
         st.session_state.mk_sel = mk_sel_name
+
+        # Auto-isi (tetap bisa diedit manual nanti di tab Info Umum / Pratinjau)
+        st.session_state.info_umum["dosen_koordinator"] = dosen_pengembang
+        st.session_state.info_umum["nama_koordinator"] = dosen_pengembang
+        pejabat_cfg = load_pejabat_config()
+        st.session_state.info_umum["nama_kaprodi"] = pejabat_cfg["kaprodi"].get(prodi_sel, "")
+        st.session_state.info_umum["nama_biro_pjm"] = pejabat_cfg["kabiro"]
+
         st.rerun()
 
     mk_row = mk_df[mk_df["Nama Mata Kuliah"] == mk_sel_name].iloc[0]
@@ -664,7 +454,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("💾 Progres")
-    st.caption("Format Excel — bisa dibuka & dicek manual bila perlu.")
+    st.caption("Format Excel, bisa dibuka & dicek manual bila perlu.")
     st.download_button(
         "Unduh Progres (.xlsx)", data=serialize_progress_excel(mk_row),
         file_name=f"progres_{mk_row['Kode MK']}.xlsx",
@@ -673,9 +463,19 @@ with st.sidebar:
     )
     up = st.file_uploader("Muat Progres (.xlsx)", type=["xlsx"], key="progress_uploader")
     if up is not None:
-        load_progress_excel(up)
-        st.success("Progres dimuat. Silakan lanjutkan pengisian.")
-        st.rerun()
+        file_fingerprint = f"{up.name}_{up.size}"
+        if st.session_state.get("_last_loaded_progress_file") != file_fingerprint:
+            try:
+                load_progress_excel(up)
+                st.session_state["_last_loaded_progress_file"] = file_fingerprint
+                st.success("Progres dimuat. Silakan lanjutkan pengisian.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gagal memuat progres: {type(e).__name__}: {e}")
+                st.caption(
+                    "Pastikan file yang diunggah adalah hasil tombol 'Unduh Progres (.xlsx)' "
+                    "dari aplikasi ini (bukan file Excel lain, dan bukan hasil ekspor RPS)."
+                )
 
     st.divider()
     st.subheader("🤖 Asisten AI (Gemini)")
@@ -703,7 +503,7 @@ with st.sidebar:
             st.text_input(
                 "Model Gemini", value="gemini-2.0-flash", key="gemini_model_name",
                 help=(
-                    "Ganti kalau muncul error kuota (429 RESOURCE_EXHAUSTED) untuk model ini — "
+                    "Ganti kalau muncul error kuota (429 RESOURCE_EXHAUSTED) untuk model ini, "
                     "coba model lain, mis. 'gemini-2.5-flash-lite', 'gemini-1.5-flash', dsb. "
                     "Ketersediaan kuota gratis per model bisa berbeda-beda dan berubah dari waktu ke waktu."
                 ),
@@ -738,6 +538,7 @@ with tab_info:
     c1, c2 = st.columns(2)
     info["dosen_koordinator"] = c1.text_input(
         "Dosen Koordinator", info["dosen_koordinator"], key=mk_key("dosen_koordinator"),
+        help="Terisi otomatis dari kolom 'Dosen Pengembang' di data master Mata Kuliah, boleh diedit.",
     )
     info["dosen_pengampu"] = c2.text_input(
         "Dosen Pengampu (Anggota)", info["dosen_pengampu"], key=mk_key("dosen_pengampu"),
@@ -747,14 +548,14 @@ with tab_info:
     )
     col1, col2 = st.columns(2)
     info["media"] = col1.text_area("Media Pembelajaran", info["media"], height=100, key=mk_key("media"))
-    info["modus"] = col2.text_area("Modus Pembelajaran", info["modus"], height=100, key=mk_key("modus"))
+    info["modus"] = col2.text_area("Perangkat Lunak/Laboratorium", info["modus"], height=100, key=mk_key("modus"))
 
 # --- Tab: CPL & CPMK ---
 with tab_cpl:
     st.subheader("Pilih CPL Mata Kuliah")
     st.caption(f"Wajib memilih tepat {N_CPL_WAJIB} CPL untuk mata kuliah ini.")
     cpl_all = cpl_df["Kode CPL"].tolist()
-    cpl_label = {row["Kode CPL"]: f"{row['Kode CPL']} — {row['Deskripsi CPL'][:70]}…"
+    cpl_label = {row["Kode CPL"]: f"{row['Kode CPL']}: {row['Deskripsi CPL'][:70]}…"
                  for _, row in cpl_df.iterrows()}
     selected = st.multiselect(
         "CPL", cpl_all, default=st.session_state.cpl_selected,
@@ -777,13 +578,16 @@ with tab_cpl:
         st.subheader("CPMK")
         st.caption(
             "CPL untuk tiap CPMK ditentukan otomatis dari urutan CPL yang dipilih di atas "
-            "(CPL ke-1 → CPMK-1, CPL ke-2 → CPMK-2, dst.) — dosen tinggal isi deskripsinya. "
+            "(CPL ke-1 → CPMK-1, CPL ke-2 → CPMK-2, dst.), dosen tinggal isi deskripsinya. "
             "Kode CPL otomatis ditambahkan dalam kurung di akhir deskripsi CPMK pada hasil ekspor."
         )
         for i in range(1, 6):
             st.session_state.cpmk_data[i]["cpl_kode"] = selected[i - 1]
+            cpl_kode_i = selected[i - 1]
+            cpl_desk_i = cpl_df.loc[cpl_df["Kode CPL"] == cpl_kode_i, "Deskripsi CPL"]
+            st.caption(f"📖 **{cpl_kode_i}**: {cpl_desk_i.values[0] if len(cpl_desk_i) else '-'}")
             st.session_state.cpmk_data[i]["deskripsi"] = st.text_area(
-                f"Deskripsi CPMK-{i}  (rujukan: {selected[i - 1]})",
+                f"Deskripsi CPMK-{i}  (rujukan: {cpl_kode_i})",
                 st.session_state.cpmk_data[i]["deskripsi"],
                 key=mk_key(f"cpmk_desk_{i}"), height=70,
             )
@@ -793,7 +597,7 @@ with tab_cpl:
 with tab_pertemuan:
     st.subheader("Rincian 16 Pertemuan")
 
-    with st.expander("📥 Impor dari Tabel (opsional) — isi banyak minggu sekaligus"):
+    with st.expander("📥 Impor dari Tabel (opsional): isi banyak minggu sekaligus"):
         st.caption(
             "Unduh templatnya, isi di Excel (lebih leluasa untuk isi banyak baris sekaligus), "
             "lalu unggah kembali untuk mengisi otomatis ke-16 pertemuan. Kolom **CPMK Ref** diisi "
@@ -827,18 +631,22 @@ with tab_pertemuan:
     cpmk_ref_options = ["-"] + [f"CPMK-{i}" for i in range(1, 6)]
     for m in range(1, N_MINGGU + 1):
         p = st.session_state.pertemuan_data[m]
-        label = f"Minggu {m}" + (" — UTS" if m == 8 else " — UAS" if m == 16 else "")
+        label = f"Minggu {m}" + (" (UTS)" if m == 8 else " (UAS)" if m == 16 else "")
         preview = p["sub_cpmk_desc"] or p["materi"] or "belum diisi"
-        with st.expander(f"{label} — {preview[:60]}{'…' if len(preview) > 60 else ''}"):
-            c1, c2 = st.columns([3, 1])
-            p["sub_cpmk_desc"] = c1.text_area("Sub-CPMK", p["sub_cpmk_desc"], key=mk_key(f"prt_sub_{m}"), height=70)
+        with st.expander(f"{label}: {preview[:60]}{'…' if len(preview) > 60 else ''}"):
             current_ref = p["cpmk_ref"] or "-"
-            ref_choice = c2.selectbox(
+            ref_choice = st.selectbox(
                 "CPMK Ref", cpmk_ref_options,
                 index=cpmk_ref_options.index(current_ref) if current_ref in cpmk_ref_options else 0,
                 key=mk_key(f"prt_cpmkref_{m}"),
             )
             p["cpmk_ref"] = None if ref_choice == "-" else ref_choice
+            if p["cpmk_ref"]:
+                idx_cpmk_disp = int(p["cpmk_ref"].split("-")[1])
+                cpmk_desc_disp = st.session_state.cpmk_data[idx_cpmk_disp]["deskripsi"]
+                st.caption(f"📖 **{p['cpmk_ref']}**: {cpmk_desc_disp or '(belum diisi)'}")
+
+            p["sub_cpmk_desc"] = st.text_area("Sub-CPMK", p["sub_cpmk_desc"], key=mk_key(f"prt_sub_{m}"), height=70)
 
             if GENAI_AVAILABLE:
                 if st.button("✨ Sarankan dengan AI", key=mk_key(f"ai_btn_{m}")):
@@ -867,10 +675,10 @@ with tab_pertemuan:
                                         f"(model: `{model_name}`). Ini bukan error dari aplikasi, melainkan "
                                         "dari sisi akun Google. Coba salah satu:\n\n"
                                         "1. Ganti **Model Gemini** di sidebar ke model lain (mis. "
-                                        "`gemini-2.5-flash-lite` atau `gemini-1.5-flash`) — kuota gratis "
+                                        "`gemini-2.5-flash-lite` atau `gemini-1.5-flash`), kuota gratis "
                                         "per model berbeda-beda.\n"
                                         "2. Aktifkan billing (pay-as-you-go) di [Google AI Studio]"
-                                        "(https://aistudio.google.com) — biaya pemakaian ringan seperti ini "
+                                        "(https://aistudio.google.com), biaya pemakaian ringan seperti ini "
                                         "biasanya sangat kecil.\n"
                                         "3. Tunggu beberapa saat lalu coba lagi (kuota harian/menit bisa reset)."
                                     )
@@ -884,7 +692,9 @@ with tab_pertemuan:
                         f"**Materi:** {suggestion.get('materi', '-')}\n\n"
                         f"**Tugas:** {suggestion.get('tugas', '-')}\n\n"
                         f"**Kriteria:** {suggestion.get('kriteria', '-')}\n\n"
-                        f"**Indikator:** {suggestion.get('indikator', '-')}"
+                        f"**Indikator:** {suggestion.get('indikator', '-')}\n\n"
+                        f"**Bloom:** {', '.join(suggestion.get('bloom', [])) or '-'}\n\n"
+                        f"**Bentuk Online:** {', '.join(suggestion.get('bentuk', [])) or '-'}"
                     )
                     ca, cb = st.columns(2)
                     if ca.button("✅ Terapkan Saran", key=mk_key(f"ai_apply_{m}")):
@@ -892,12 +702,16 @@ with tab_pertemuan:
                         new_tugas = suggestion.get("tugas", p["tugas"])
                         new_kriteria = suggestion.get("kriteria", p["kriteria"])
                         new_indikator = suggestion.get("indikator", p["indikator"])
+                        new_bloom = [b for b in suggestion.get("bloom", []) if b in BLOOM_LEVELS] or p["bloom"]
+                        new_bentuk = [b for b in suggestion.get("bentuk", []) if b in BENTUK_OPTIONS] or p["bentuk"]
                         # Tulis ke data kita sendiri...
                         p["materi"] = new_materi
                         p["tugas"] = new_tugas
                         p["kriteria"] = new_kriteria
                         p["indikator"] = new_indikator
-                        # ...DAN ke key widget-nya langsung — widget dengan `key` tetap akan
+                        p["bloom"] = new_bloom
+                        p["bentuk"] = new_bentuk
+                        # ...DAN ke key widget-nya langsung: widget dengan `key` tetap akan
                         # selalu memakai nilai dari session_state[key], bukan argumen `value=`
                         # yang kita berikan, begitu key tersebut pernah dibuat. Tanpa baris ini
                         # perubahan tidak akan pernah muncul di kotak teksnya.
@@ -905,6 +719,8 @@ with tab_pertemuan:
                         st.session_state[mk_key(f"prt_tugas_{m}")] = new_tugas
                         st.session_state[mk_key(f"prt_kriteria_{m}")] = new_kriteria
                         st.session_state[mk_key(f"prt_indikator_{m}")] = new_indikator
+                        st.session_state[mk_key(f"prt_bloom_{m}")] = new_bloom
+                        st.session_state[mk_key(f"prt_bentuk_{m}")] = new_bentuk
                         del st.session_state[mk_key(f"ai_suggestion_{m}")]
                         st.rerun()
                     if cb.button("✖ Abaikan", key=mk_key(f"ai_dismiss_{m}")):
@@ -946,7 +762,7 @@ with tab_ref:
         st.session_state.referensi_data.append({"sitasi": ""})
         st.rerun()
 
-# --- Tab: Komponen Penilaian (radio per CPMK — bebas isu 2x klik data_editor) ---
+# --- Tab: Komponen Penilaian (radio per CPMK, bebas isu 2x klik data_editor) ---
 with tab_nilai:
     st.subheader("Komponen Penilaian")
     st.caption(
@@ -987,33 +803,46 @@ with tab_export:
         st.divider()
         st.subheader("Validasi Dokumen")
         st.caption(
-            "Nama-nama ini akan muncul di blok tanda tangan pada bagian akhir dokumen (tanpa QR code — "
-            "ruang kosong disediakan untuk tanda tangan fisik)."
+            "Nama-nama ini akan muncul di blok tanda tangan pada bagian akhir dokumen (tanpa QR code, "
+            "ruang kosong disediakan untuk tanda tangan fisik). Kaprodi, Koordinator, dan Kepala Biro "
+            "Penjaminan Mutu terisi otomatis dari data master/`config/pejabat.txt`, boleh diedit."
         )
         info = st.session_state.info_umum
         info["tanggal_dokumen"] = st.text_input(
             "Tanggal Dokumen (mis. 28/10/2025)", info["tanggal_dokumen"], key=mk_key("tanggal_dokumen"),
         )
         vc1, vc2, vc3 = st.columns(3)
-        info["nama_kaprodi"] = vc1.text_input("Nama Ketua Prodi", info["nama_kaprodi"], key=mk_key("nama_kaprodi"))
+        info["nama_kaprodi"] = vc1.text_input(
+            "Nama Ketua Prodi", info["nama_kaprodi"], key=mk_key("nama_kaprodi"),
+            help="Terisi otomatis dari config/pejabat.txt (baris KAPRODI_<Nama Prodi>), boleh diedit.",
+        )
         info["nama_koordinator"] = vc2.text_input(
             "Nama Koordinator MK/Bidang Keahlian", info["nama_koordinator"], key=mk_key("nama_koordinator"),
+            help="Terisi otomatis dari kolom 'Dosen Pengembang' di data master Mata Kuliah, boleh diedit.",
         )
         info["nama_penyusun"] = vc3.text_input(
             "Nama Dosen Penyusun", info["nama_penyusun"], key=mk_key("nama_penyusun"),
         )
         info["nama_biro_pjm"] = st.text_input(
             "Nama Kepala Biro Penjaminan Mutu", info["nama_biro_pjm"], key=mk_key("nama_biro_pjm"),
+            help="Terisi otomatis dari config/pejabat.txt (baris KABIRO_PENJAMINAN_MUTU), boleh diedit.",
         )
 
         st.divider()
         col1, col2 = st.columns(2)
         with col1:
-            excel_buf = export_to_excel(mk_row, cpl_df)
-            st.download_button("⬇️ Unduh Excel", data=excel_buf,
-                                file_name=f"RPS_{mk_row['Kode MK']}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="download_excel_btn")
+            docx_buf = build_docx(
+                prodi=st.session_state.prodi_sel, mk_row=mk_row, cpl_df=cpl_df,
+                info_umum=st.session_state.info_umum, cpmk_data=st.session_state.cpmk_data,
+                pertemuan_data=st.session_state.pertemuan_data,
+                referensi_data=st.session_state.referensi_data,
+                komponen_data=st.session_state.komponen_data,
+                bobot_kategori=BOBOT_KATEGORI,
+            )
+            st.download_button("⬇️ Unduh Word (.docx)", data=docx_buf,
+                                file_name=f"RPS_{mk_row['Kode MK']}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key="download_docx_btn")
         with col2:
             pdf_buf = build_pdf(
                 prodi=st.session_state.prodi_sel, mk_row=mk_row, cpl_df=cpl_df,
