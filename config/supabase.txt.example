@@ -1,0 +1,20 @@
+# Konfigurasi koneksi Supabase (Fase 1)
+#
+# Cara isi:
+#   1. Buat project di https://supabase.com (gratis, daftar pakai email)
+#   2. Di dashboard project -> Project Settings -> Data API:
+#      - "Project URL"      -> SUPABASE_URL
+#      - "anon public" key  -> SUPABASE_ANON_KEY
+#   3. (opsional, hanya dipakai skrip migrasi/admin yang perlu bypass Row Level
+#      Security, mis. skrip migrasi Excel->database di Fase 3) -> Project Settings
+#      -> Data API -> "service_role" key -> SUPABASE_SERVICE_ROLE_KEY
+#      JANGAN pernah dipakai dari app.py yang diakses banyak Dosen - key ini
+#      punya akses penuh tanpa dibatasi RLS.
+#
+# Salin file ini menjadi config/supabase.txt lalu isi nilai di bawah dengan
+# yang asli. File config/supabase.txt (BUKAN yang .example ini) sudah masuk
+# .gitignore - tidak akan ikut ter-commit ke git.
+
+SUPABASE_URL=https://fpzppdhzxtsjxztycnhj.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwenBwZGh6eHRzanh6dHljbmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyNzIzMjEsImV4cCI6MjEwMjg0ODMyMX0.sccQj3hFcFYlJEVJmXcXV5udS4h9-TwGUX2FzdPR9zA
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwenBwZGh6eHRzanh6dHljbmhqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NzI3MjMyMSwiZXhwIjoyMTAyODQ4MzIxfQ.Znmj7uSGuBEsYXi1AL7Aq3kiCkb00t-ITUMtPn51qpQ

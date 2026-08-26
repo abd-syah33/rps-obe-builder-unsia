@@ -1,0 +1,18 @@
+# Konfigurasi API Key & Model Gemini DEFAULT (opsional)
+#
+# Isi baris di bawah ini untuk menyediakan API Key default yang bisa dipakai
+# semua Dosen tanpa perlu API key sendiri-sendiri. Kalau kuota API key default
+# ini habis/limit, Dosen tetap bisa memilih opsi "API Key Sendiri" di sidebar
+# aplikasi sebagai cadangan.
+#
+# Format: KEY=VALUE, satu baris per pengaturan. Baris yang diawali "#" diabaikan.
+#
+# PENTING soal keamanan:
+# - Jangan unggah file ini ke repository publik (GitHub publik, dsb.) kalau
+#   sudah diisi API key asli.
+# - Kalau nanti aplikasi ini di-deploy ke Streamlit Community Cloud atau
+#   layanan hosting lain, sebaiknya pindahkan API key ke fitur "Secrets"
+#   bawaan platform tersebut, bukan lewat file ini.
+
+GEMINI_API_KEY=
+GEMINI_MODEL=
