@@ -22,6 +22,7 @@ import io
 import glob
 import os
 import json
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -35,11 +36,15 @@ try:
 except ImportError:
     GENAI_AVAILABLE = False
 
-from pdf_export import (
-    build_pdf, with_code, CATATAN_POINTS, SKS_ROWS, BLOOM_TABLE, METODE_TABLE,
-    BENTUK_TABLE, KOMPONEN_PENJELASAN, RUBRIK_ROWS,
-)
-from docx_export import build_docx
+from pdf_export import with_code
+from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOBOT_KATEGORI
+from auth import require_login, get_client
+from db_master import list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum
+from admin_panel import render_admin_panel
+from kaprodi_panel import render_kaprodi_panel
+from rps_store import load_rps, save_rps, ajukan_rps, tarik_pengajuan_rps
+from rps_saya import render_rps_saya
+from rps_browse import render_rps_disetujui
 
 # --------------------------------------------------------------------------
 # Konstanta
@@ -96,26 +101,27 @@ def load_pejabat_config():
     return result
 
 BLOOM_LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6"]
-METODE_OPTIONS = ["SGD", "RPlS", "DL", "SDL", "CoL", "CbL", "CtL", "PjBL", "PBL"]
-BENTUK_OPTIONS = ["EL-1", "EL-2", "EL-3", "EL-4", "EL-5", "EL-6", "EL-7", "EL-8"]
+METODE_OPTIONS = ["SGD", "RPS", "DL", "SDL", "CoL", "CbL", "CtL", "PjBL", "PBL", "BL"]
+BENTUK_OPTIONS = ["EL-1", "EL-2", "EL-3", "EL-4", "EL-5", "EL-6", "EL-7", "EL-8", "EL-9"]
 
 BLOOM_INFO = {
     "C1": "Remembering", "C2": "Understanding", "C3": "Applying",
     "C4": "Analyzing", "C5": "Evaluating", "C6": "Creating",
 }
 METODE_INFO = {
-    "SGD": "Small Group Discussion", "RPlS": "Role-Play & Simulation",
+    "SGD": "Small Group Discussion", "RPS": "Role-Play & Simulation",
     "DL": "Discovery Learning", "SDL": "Self-Directed Learning",
     "CoL": "Cooperative Learning", "CbL": "Collaborative Learning",
-    "CtL": "Contextual Learning", "PjBL": "Problem Based Learning & Inquiry",
-    "PBL": "Project Based Learning",
+    "CtL": "Contextual Learning", "PjBL": "Project Based Learning",
+    "PBL": "Problem Based Learning & Inquiry", "BL": "Blended Learning",
 }
 BENTUK_INFO = {
     "EL-1": "Video E-Learning", "EL-2": "Discussion at Forum",
-    "EL-3": "Reading Module", "EL-4": "Video Conference / Webinar",
-    "EL-5": "E-simulation using software (Virtual Lab)",
-    "EL-6": "E-learning Link (jurnal/pustaka online)",
-    "EL-7": "Vlog Presentation", "EL-8": "Assignment",
+    "EL-3": "Video Conference atau Webinar (Web Seminar)",
+    "EL-4": "E-simulation using software (Virtual Lab)",
+    "EL-5": "E-learning Link (journal online, library online, digital learning dari URL/HTTP)",
+    "EL-6": "Vlog Presentation", "EL-7": "Writing Paper on-line",
+    "EL-8": "Virtual Lab", "EL-9": "AI Learning Mode",
 }
 
 
@@ -123,13 +129,39 @@ def info_tooltip(info_dict):
     return "  \n".join(f"**{k}**: {v}" for k, v in info_dict.items())
 
 
+def format_tanggal_indonesia(iso_str):
+    """Ubah timestamp ISO (dari kolom rps.diajukan_pada di Supabase, mis.
+    '2026-08-23T10:15:00+00:00') jadi format tanggal Indonesia sederhana (mis.
+    '23 Agustus 2026'). Kembalikan None kalau kosong/tidak valid - pemanggil yang
+    memutuskan teks fallback-nya (mis. "(belum diajukan)")."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    bulan = [
+        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+    ]
+    return f"{dt.day} {bulan[dt.month - 1]} {dt.year}"
+
+
 N_CPL_WAJIB = 5
 N_MINGGU = 16
-KATEGORI_PENILAIAN = ["Kehadiran dan Sikap", "Tugas", "UTS", "UAS"]
-BOBOT_KATEGORI = {"Kehadiran dan Sikap": 30, "Tugas": 20, "UTS": 20, "UAS": 30}
-HEADER_BLUE = "#B7DDE8"  # warna asli header tabel RPS UNSIA
+KATEGORI_PENILAIAN = ["Kehadiran dan Sikap", "UTS", "Tugas", "UAS"]
+HEADER_BLUE = "#92CDDC"  # warna header tabel utama, sesuai template resmi terbaru
 
 st.set_page_config(page_title="RPS Builder · UNSIA", layout="wide")
+
+# --------------------------------------------------------------------------
+# Fase 2: gerbang login - hentikan halaman kalau belum masuk.
+# Penyesuaian: Admin/Kaprodi TIDAK dikunci eksklusif ke panel masing-masing -
+# semua peran tetap bisa mengisi RPS sendiri (kepemilikan RPS berbasis akun,
+# bukan role). Menu di bawah menampilkan opsi tambahan sesuai role.
+# --------------------------------------------------------------------------
+pengguna = require_login()
+client = get_client()
 
 
 # --------------------------------------------------------------------------
@@ -151,11 +183,10 @@ yang diberikan relevan dan konsisten dengan arah keseluruhan mata kuliah, bukan 
 Sarankan draf singkat, konkret, dan realistis untuk SATU pertemuan ini saja (bukan seluruh semester),
 dalam Bahasa Indonesia:
 - materi: poin-poin utama materi pembelajaran minggu ini (boleh berupa daftar singkat)
-- tugas: deskripsi tugas/quiz/assignment yang sesuai untuk pertemuan ini
-- kriteria: kriteria penilaian untuk tugas tersebut
+- bentuk_asesmen: bentuk asesmen penilaian yang sesuai untuk pertemuan ini (mis. kuis, tugas individu, presentasi)
 - indikator: indikator penilaian yang terukur
 - bloom: 1-2 level Bloom's Taxonomy yang paling sesuai dengan kedalaman pertemuan ini
-- bentuk: 1-2 bentuk pembelajaran online yang paling sesuai dengan materi/tugas yang disarankan"""
+- bentuk: 1-2 bentuk pembelajaran online yang paling sesuai dengan materi/asesmen yang disarankan"""
 
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -163,13 +194,12 @@ dalam Bahasa Indonesia:
             "type": "object",
             "properties": {
                 "materi": {"type": "string"},
-                "tugas": {"type": "string"},
-                "kriteria": {"type": "string"},
+                "bentuk_asesmen": {"type": "string"},
                 "indikator": {"type": "string"},
                 "bloom": {"type": "array", "items": {"type": "string", "enum": BLOOM_LEVELS}},
                 "bentuk": {"type": "array", "items": {"type": "string", "enum": BENTUK_OPTIONS}},
             },
-            "required": ["materi", "tugas", "kriteria", "indikator", "bloom", "bentuk"],
+            "required": ["materi", "bentuk_asesmen", "indikator", "bloom", "bentuk"],
         },
     )
     response = client.models.generate_content(model=model_name, contents=prompt, config=config)
@@ -180,46 +210,52 @@ dalam Bahasa Indonesia:
 # --------------------------------------------------------------------------
 # Data master
 # --------------------------------------------------------------------------
-@st.cache_data
-def list_prodi():
-    files = glob.glob(os.path.join(DATA_DIR, "*.xlsx"))
-    return sorted([os.path.splitext(os.path.basename(f))[0] for f in files])
-
-
-@st.cache_data
-def load_master(prodi_name):
-    path = os.path.join(DATA_DIR, f"{prodi_name}.xlsx")
-    mk_df = pd.read_excel(path, sheet_name="Mata Kuliah")
-    cpl_df = pd.read_excel(path, sheet_name="CPL")
-    return mk_df, cpl_df
-
+# Fase 3: dipindah ke db_master.py (baca dari tabel Supabase, bukan file
+# Excel di folder data/ lagi). Lihat list_prodi_db() & load_master_db() yang
+# di-import di atas. File Excel di data/ tetap ada sebagai sumber untuk
+# scripts/migrate_excel_to_db.py, tapi tidak lagi dibaca langsung di sini.
 
 # --------------------------------------------------------------------------
 # Session state
 # --------------------------------------------------------------------------
 def default_pertemuan():
-    return {
+    pertemuan = {
         m: {
             "sub_cpmk_desc": "", "cpmk_ref": None, "bloom": [], "materi": "",
-            "metode": [], "bentuk": [], "tugas": "", "kriteria": "", "indikator": "",
-            "referensi": "", "bobot": 0,
+            "metode": [], "bentuk": [], "bentuk_asesmen": "", "indikator": "",
         } for m in range(1, N_MINGGU + 1)
     }
+    # Minggu 8 & 16 di template baru sekarang punya barisnya sendiri (tidak lagi
+    # dilompati/digabung seperti template lama) - auto-isi teks starting default,
+    # tetap bisa diedit/dihapus dosen kalau mau isi lain.
+    pertemuan[8]["sub_cpmk_desc"] = "Ujian Tengah Semester (UTS)"
+    pertemuan[16]["sub_cpmk_desc"] = "Ujian Akhir Semester (UAS)"
+    return pertemuan
 
 
 def init_state():
     defaults = {
         "prodi_sel": None,
+        "tahun_sel": None,
         "mk_sel": None,
         "cpl_selected": [],
         "info_umum": {
-            "dosen_koordinator": "", "dosen_pengampu": "", "deskripsi_mk": "", "media": "", "modus": "",
+            # dosen_pengampu SENGAJA tidak lagi diisi manual di sini - dokumen yang
+            # diekspor selalu memakai nama akun yang sedang mengunduh (lihat tab
+            # Pratinjau & Ekspor), bukan nilai tersimpan. Kuncinya tetap ada di
+            # dict ini untuk kompatibilitas mundur data lama, tapi tidak ada widget
+            # untuk mengeditnya lagi.
+            "dosen_koordinator": "", "dosen_pengampu": "", "deskripsi_mk": "",
+            "rumpun_mk": "",
             "nama_kaprodi": "", "nama_koordinator": "", "nama_penyusun": "",
             "nama_biro_pjm": "", "tanggal_dokumen": "",
         },
         "cpmk_data": {i: {"cpl_kode": None, "deskripsi": ""} for i in range(1, 6)},
         "pertemuan_data": default_pertemuan(),
-        "komponen_data": {i: None for i in range(1, 6)},
+        # dict persen per kategori per CPMK (bukan checklist lagi) - tiap
+        # kategori (kolom) totalnya harus PAS sama dengan bobot kategori itu,
+        # dijumlah dari 5 CPMK (lihat get_komponen_issues() & tab_nilai).
+        "komponen_data": {i: {kat: 0 for kat in KATEGORI_PENILAIAN} for i in range(1, 6)},
         "referensi_data": [],
     }
     for k, v in defaults.items():
@@ -249,14 +285,11 @@ def pertemuan_to_df(pertemuan_data):
             "Sub-CPMK": p.get("sub_cpmk_desc", ""),
             "CPMK Ref": p.get("cpmk_ref") or "-",
             "Bloom": ", ".join(p.get("bloom", [])),
-            "Materi": p.get("materi", ""),
+            "Indikator": p.get("indikator", ""),
+            "Bentuk Asesmen": p.get("bentuk_asesmen", ""),
             "Metode": ", ".join(p.get("metode", [])),
             "Bentuk Online": ", ".join(p.get("bentuk", [])),
-            "Deskripsi Tugas": p.get("tugas", ""),
-            "Kriteria": p.get("kriteria", ""),
-            "Indikator": p.get("indikator", ""),
-            "Referensi": p.get("referensi", ""),
-            "Bobot (%)": p.get("bobot", 0),
+            "Materi": p.get("materi", ""),
         })
     return pd.DataFrame(rows)
 
@@ -272,20 +305,88 @@ def df_to_pertemuan(df):
             "sub_cpmk_desc": row["Sub-CPMK"] or "",
             "cpmk_ref": None if cpmk_ref in ("-", None, "") else cpmk_ref,
             "bloom": [x.strip() for x in str(row["Bloom"] or "").split(",") if x.strip()],
-            "materi": row["Materi"] or "",
+            "indikator": row["Indikator"] or "",
+            "bentuk_asesmen": row["Bentuk Asesmen"] or "",
             "metode": [x.strip() for x in str(row["Metode"] or "").split(",") if x.strip()],
             "bentuk": [x.strip() for x in str(row["Bentuk Online"] or "").split(",") if x.strip()],
-            "tugas": row["Deskripsi Tugas"] or "",
-            "kriteria": row["Kriteria"] or "",
-            "indikator": row["Indikator"] or "",
-            "referensi": row["Referensi"] or "",
-            "bobot": int(row["Bobot (%)"]) if pd.notna(row["Bobot (%)"]) else 0,
+            "materi": row["Materi"] or "",
         }
     # pastikan minggu 1-16 selalu ada meski file yang diimpor tidak lengkap
     for m in range(1, N_MINGGU + 1):
         if m not in data:
             data[m] = default_pertemuan()[m]
     return data
+
+
+# --------------------------------------------------------------------------
+# Konversi session_state <-> kolom `data` (JSONB) di tabel `rps` - Fase 4.
+# Dipakai untuk simpan/muat ke database, menggantikan Unduh/Muat Progres Excel
+# sebagai mekanisme utama (Excel tetap ada sebagai cadangan opsional).
+# --------------------------------------------------------------------------
+def state_to_rps_data():
+    return {
+        "cpl_selected": st.session_state.cpl_selected,
+        "info_umum": st.session_state.info_umum,
+        "cpmk_data": {str(k): v for k, v in st.session_state.cpmk_data.items()},
+        "pertemuan_data": {str(k): v for k, v in st.session_state.pertemuan_data.items()},
+        "komponen_data": {str(k): v for k, v in st.session_state.komponen_data.items()},
+        "referensi_data": st.session_state.referensi_data,
+    }
+
+
+def _normalize_komponen_row(value):
+    """Normalisasi satu baris komponen_data ke format TERBARU (dict persen per
+    kategori, mis. {"UTS": 20}). Format lama (checklist/list, atau nilai
+    tunggal/string dari sebelum itu) TIDAK membawa info persentase sama
+    sekali, jadi RPS lama otomatis di-reset ke 0 untuk tab Komponen Penilaian
+    ini saja - Dosen perlu mengisi ulang pembagian persentasenya (isi CPMK &
+    bagian lain RPS TIDAK terpengaruh/tidak hilang)."""
+    if isinstance(value, dict):
+        return {kat: int(value.get(kat) or 0) for kat in KATEGORI_PENILAIAN}
+    return {kat: 0 for kat in KATEGORI_PENILAIAN}
+
+
+def get_komponen_issues():
+    """Daftar kategori yang totalnya (dijumlah dari 5 CPMK) belum PAS sama
+    dengan bobot kategori itu. List kosong = semua sudah benar."""
+    issues = []
+    for kategori in KATEGORI_PENILAIAN:
+        target = BOBOT_KATEGORI.get(kategori, 0)
+        total = sum(
+            (st.session_state.komponen_data.get(i) or {}).get(kategori, 0)
+            for i in range(1, 6)
+        )
+        if total != target:
+            issues.append(f"{kategori}: total {total}% (seharusnya {target}%)")
+    return issues
+
+
+def apply_rps_data_to_state(data):
+    """Timpa session_state RPS yang aktif dengan isi `data` (dari kolom JSONB
+    rps.data). Dipanggil setelah reset_rps_state()+auto-isi, jadi field yang
+    memang tersimpan di `data` akan menang dibanding nilai auto-isi default."""
+    st.session_state.cpl_selected = data.get("cpl_selected") or []
+
+    info = dict(st.session_state.info_umum)
+    info.update(data.get("info_umum") or {})
+    st.session_state.info_umum = info
+
+    cpmk = {i: {"cpl_kode": None, "deskripsi": ""} for i in range(1, 6)}
+    for k, v in (data.get("cpmk_data") or {}).items():
+        cpmk[int(k)] = v
+    st.session_state.cpmk_data = cpmk
+
+    pertemuan = default_pertemuan()
+    for k, v in (data.get("pertemuan_data") or {}).items():
+        pertemuan[int(k)] = v
+    st.session_state.pertemuan_data = pertemuan
+
+    komponen = {i: {kat: 0 for kat in KATEGORI_PENILAIAN} for i in range(1, 6)}
+    for k, v in (data.get("komponen_data") or {}).items():
+        komponen[int(k)] = _normalize_komponen_row(v)
+    st.session_state.komponen_data = komponen
+
+    st.session_state.referensi_data = data.get("referensi_data") or []
 
 
 # --------------------------------------------------------------------------
@@ -301,9 +402,9 @@ def serialize_progress_excel(mk_row):
     ws_meta.append(["prodi_sel", st.session_state.prodi_sel])
     ws_meta.append(["mk_sel", st.session_state.mk_sel])
     info = st.session_state.info_umum
-    for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk", "media", "modus",
-                "nama_kaprodi", "nama_koordinator", "nama_penyusun", "nama_biro_pjm",
-                "tanggal_dokumen"):
+    for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
+                "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
+                "nama_biro_pjm", "tanggal_dokumen"):
         ws_meta.append([key, info.get(key, "")])
 
     ws_cpl = wb.create_sheet("CPL_Selected")
@@ -318,9 +419,10 @@ def serialize_progress_excel(mk_row):
         ws_cpmk.append([i, c["cpl_kode"], c["deskripsi"]])
 
     ws_komp = wb.create_sheet("Komponen")
-    ws_komp.append(["CPMK", "Kategori"])
+    ws_komp.append(["CPMK"] + KATEGORI_PENILAIAN)
     for i in range(1, 6):
-        ws_komp.append([f"CPMK-{i}", st.session_state.komponen_data.get(i) or ""])
+        row_persen = st.session_state.komponen_data.get(i) or {}
+        ws_komp.append([f"CPMK-{i}"] + [row_persen.get(kat, 0) for kat in KATEGORI_PENILAIAN])
 
     ws_ref = wb.create_sheet("Referensi")
     ws_ref.append(["No", "Sitasi"])
@@ -350,9 +452,9 @@ def load_progress_excel(uploaded_file):
         # Perbarui info_umum field-per-field (bukan mengganti seluruh dict), supaya field
         # yang belum ada di file progres lama (mis. ditambahkan di versi aplikasi yang lebih
         # baru) tidak sampai hilang dan menyebabkan KeyError di tempat lain.
-        for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk", "media", "modus",
-                    "nama_kaprodi", "nama_koordinator", "nama_penyusun", "nama_biro_pjm",
-                    "tanggal_dokumen"):
+        for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
+                    "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
+                    "nama_biro_pjm", "tanggal_dokumen"):
             st.session_state.info_umum[key] = meta.get(key) or st.session_state.info_umum.get(key, "")
 
     if "CPL_Selected" in wb.sheetnames:
@@ -375,7 +477,10 @@ def load_progress_excel(uploaded_file):
         ws = wb["Komponen"]
         komponen_data = {}
         for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=1):
-            komponen_data[i] = row[1] or None
+            komponen_data[i] = {
+                kat: int(row[j + 1] or 0) if j + 1 < len(row) else 0
+                for j, kat in enumerate(KATEGORI_PENILAIAN)
+            }
         if komponen_data:
             st.session_state.komponen_data = komponen_data
 
@@ -403,28 +508,118 @@ init_state()
 st.title("📘 RPS Builder")
 st.caption("Universitas Siber Asia")
 
+# Penyesuaian: menu dasar sama untuk semua orang (Isi RPS, RPS Saya, RPS
+# Disetujui - RPS tetap milik Mata Kuliah/koordinatornya, bukan tergantung
+# role), Kaprodi/Admin cuma dapat TAMBAHAN opsi menu untuk panel masing-
+# masing. Ini supaya Kaprodi yang juga mengajar (jadi koordinator Mata
+# Kuliahnya sendiri) tetap bisa mengisi RPS-nya sendiri, bukan terkunci
+# hanya ke panel Kaprodi.
+menu_options = ["✏️ Isi RPS", "📋 RPS Saya", "📚 RPS Disetujui"]
+if pengguna["role"] == "kaprodi":
+    menu_options.append("✅ Review Kaprodi")
+elif pengguna["role"] == "admin":
+    menu_options.append("⚙️ Panel Admin")
+
+# Fase 4: kalau tombol "Buka" di halaman RPS Saya baru saja diklik, paksa
+# menu balik ke "Isi RPS". HARUS dicek di sini, SEBELUM widget menu_utama
+# di bawah diinstansiasi - session_state sebuah widget tidak boleh diubah
+# lagi setelah widget-nya sendiri sempat dirender di run yang sama.
+if st.session_state.pop("_jump_to_isi_rps", False):
+    st.session_state["menu_utama"] = "✏️ Isi RPS"
+
+menu = st.radio(
+    "Menu", menu_options, horizontal=True,
+    key="menu_utama", label_visibility="collapsed",
+)
+if menu == "📋 RPS Saya":
+    render_rps_saya(client, pengguna)
+    st.stop()
+elif menu == "📚 RPS Disetujui":
+    render_rps_disetujui(client, pengguna)
+    st.stop()
+elif menu == "✅ Review Kaprodi":
+    render_kaprodi_panel(client, pengguna)
+    st.stop()
+elif menu == "⚙️ Panel Admin":
+    render_admin_panel(client)
+    st.stop()
+
 with st.sidebar:
     st.header("Pilih Mata Kuliah")
 
-    prodi_options = list_prodi()
+    prodi_rows = list_prodi_db(client)
+    prodi_options = [p["nama"] for p in prodi_rows]
     if not prodi_options:
-        st.error("Tidak ada data Prodi di folder data/. Tambahkan file xlsx (lihat README).")
+        st.error(
+            "Belum ada data Prodi di database. Minta Admin menjalankan migrasi "
+            "(scripts/migrate_excel_to_db.py) atau menambah Prodi lewat Panel Admin."
+        )
         st.stop()
+
+    # Penyesuaian: default Prodi yang tampil pertama kali = Prodi Homebase akun
+    # yang login (kalau ada) - MURNI titik awal yang nyaman, sama sekali tidak
+    # membatasi; begitu dipilih, prodi_sel tersimpan di session_state dan
+    # penggantian manual berikutnya (baris "if prodi_sel != ..." di bawah) yang
+    # menentukan, bukan homebase ini lagi.
+    homebase_nama = next(
+        (p["nama"] for p in prodi_rows if p["id"] == pengguna.get("prodi_id")), None
+    )
+    if st.session_state.prodi_sel in prodi_options:
+        default_index = prodi_options.index(st.session_state.prodi_sel)
+    elif homebase_nama in prodi_options:
+        default_index = prodi_options.index(homebase_nama)
+    else:
+        default_index = 0
 
     prodi_sel = st.selectbox(
         "Program Studi", prodi_options,
-        index=prodi_options.index(st.session_state.prodi_sel) if st.session_state.prodi_sel in prodi_options else 0,
+        index=default_index,
         key="prodi_selectbox",
     )
     if prodi_sel != st.session_state.prodi_sel:
         st.session_state.prodi_sel = prodi_sel
         st.session_state.mk_sel = None
 
-    mk_df, cpl_df = load_master(prodi_sel)
+    prodi_id = get_prodi_id(prodi_rows, prodi_sel)
+
+    # Penyesuaian: kurikulum ganda - satu Prodi bisa punya beberapa Tahun
+    # Kurikulum berdampingan (mis. 2021 & 2026), masing-masing Mata Kuliahnya
+    # terpisah sepenuhnya (baris database berbeda, koordinator bisa berbeda).
+    tahun_options = list_tahun_kurikulum(client, prodi_id)
+    tahun_sel = st.selectbox(
+        "Tahun Kurikulum", tahun_options,
+        index=tahun_options.index(st.session_state.tahun_sel) if st.session_state.tahun_sel in tahun_options else len(tahun_options) - 1,
+        key="tahun_selectbox",
+    )
+    if tahun_sel != st.session_state.tahun_sel:
+        st.session_state.tahun_sel = tahun_sel
+        st.session_state.mk_sel = None
+
+    mk_df_semua, cpl_df = load_master_db(client, prodi_id, tahun_sel)
+    # Penyesuaian: hanya Mata Kuliah yang koordinatornya = Anda yang boleh
+    # diisi - Mata Kuliah tanpa koordinator, atau koordinatornya orang lain,
+    # tidak muncul di dropdown ini sama sekali (dikunci di level akses).
+    mk_df = mk_df_semua[mk_df_semua["koordinator_user_id"] == pengguna["id"]].reset_index(drop=True)
     mk_options = mk_df["Nama Mata Kuliah"].tolist()
+    if not mk_options:
+        st.warning(
+            f"Anda belum ditetapkan sebagai koordinator Mata Kuliah manapun di Prodi "
+            f"'{prodi_sel}' untuk kurikulum {tahun_sel}. Hubungi Kaprodi/Admin Prodi ini "
+            "untuk ditetapkan sebagai koordinator suatu Mata Kuliah dulu, atau coba "
+            "pilih Tahun Kurikulum lain."
+        )
+        st.stop()
+    # Label tampilan "Kode - Nama" (Kode MK didahulukan) - HANYA untuk tampilan,
+    # value yang dipakai untuk pencocokan/session_state tetap Nama Mata Kuliah
+    # seperti sebelumnya, supaya tidak perlu ubah logika di tempat lain.
+    label_mk = {
+        row["Nama Mata Kuliah"]: f"{row['Kode MK']} - {row['Nama Mata Kuliah']}"
+        for _, row in mk_df.iterrows()
+    }
     mk_sel_name = st.selectbox(
         "Mata Kuliah", mk_options,
         index=mk_options.index(st.session_state.mk_sel) if st.session_state.mk_sel in mk_options else 0,
+        format_func=lambda nama: label_mk.get(nama, nama),
         key="mk_selectbox",
     )
 
@@ -444,6 +639,22 @@ with st.sidebar:
         st.session_state.info_umum["nama_kaprodi"] = pejabat_cfg["kaprodi"].get(prodi_sel, "")
         st.session_state.info_umum["nama_biro_pjm"] = pejabat_cfg["kabiro"]
 
+        # Fase 4: kalau RPS untuk Mata Kuliah ini sudah pernah disimpan
+        # sebelumnya (oleh Dosen yang sama), muat isinya - menang dibanding
+        # auto-isi default di atas.
+        existing = load_rps(client, new_mk_row["id"])
+        if existing:
+            apply_rps_data_to_state(existing["data"])
+            st.session_state["_rps_id"] = existing["id"]
+            st.session_state["_rps_status"] = existing["status"]
+            st.session_state["_rps_catatan"] = existing.get("catatan_kaprodi")
+            st.session_state["_rps_diajukan_pada"] = existing.get("diajukan_pada")
+        else:
+            st.session_state["_rps_id"] = None
+            st.session_state["_rps_status"] = None
+            st.session_state["_rps_catatan"] = None
+            st.session_state["_rps_diajukan_pada"] = None
+
         st.rerun()
 
     mk_row = mk_df[mk_df["Nama Mata Kuliah"] == mk_sel_name].iloc[0]
@@ -453,29 +664,95 @@ with st.sidebar:
     """)
 
     st.divider()
-    st.subheader("💾 Progres")
-    st.caption("Format Excel, bisa dibuka & dicek manual bila perlu.")
-    st.download_button(
-        "Unduh Progres (.xlsx)", data=serialize_progress_excel(mk_row),
-        file_name=f"progres_{mk_row['Kode MK']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="download_progress_btn",
-    )
-    up = st.file_uploader("Muat Progres (.xlsx)", type=["xlsx"], key="progress_uploader")
-    if up is not None:
-        file_fingerprint = f"{up.name}_{up.size}"
-        if st.session_state.get("_last_loaded_progress_file") != file_fingerprint:
+    st.subheader("💾 Simpan RPS")
+    status_saat_ini = st.session_state.get("_rps_status") or "draft"
+    status_label = {
+        "draft": "📝 Draft", "diajukan": "📤 Diajukan",
+        "disetujui": "✅ Disetujui", "ditolak": "↩️ Ditolak",
+    }
+    bisa_edit = status_saat_ini in ("draft", "ditolak")
+
+    if st.session_state.get("_rps_id"):
+        st.caption(f"Status: {status_label.get(status_saat_ini, status_saat_ini)} · tersimpan di database")
+    else:
+        st.caption("Belum pernah disimpan ke database untuk Mata Kuliah ini.")
+
+    if status_saat_ini == "ditolak" and st.session_state.get("_rps_catatan"):
+        st.warning(f"**Catatan Kaprodi:** {st.session_state['_rps_catatan']}")
+
+    if bisa_edit:
+        if st.button("💾 Simpan ke Database", key="save_rps_btn", type="primary", use_container_width=True):
             try:
-                load_progress_excel(up)
-                st.session_state["_last_loaded_progress_file"] = file_fingerprint
-                st.success("Progres dimuat. Silakan lanjutkan pengisian.")
-                st.rerun()
+                saved = save_rps(client, mk_row["id"], pengguna["id"], state_to_rps_data())
+                st.session_state["_rps_id"] = saved["id"]
+                st.session_state["_rps_status"] = saved["status"]
+                st.success("RPS berhasil disimpan ke database.")
             except Exception as e:
-                st.error(f"Gagal memuat progres: {type(e).__name__}: {e}")
-                st.caption(
-                    "Pastikan file yang diunggah adalah hasil tombol 'Unduh Progres (.xlsx)' "
-                    "dari aplikasi ini (bukan file Excel lain, dan bukan hasil ekspor RPS)."
-                )
+                st.error(f"Gagal menyimpan: {e}")
+
+        if st.session_state.get("_rps_id"):
+            if st.button("📤 Ajukan ke Kaprodi", key="ajukan_btn", use_container_width=True):
+                issues = get_komponen_issues()
+                if issues:
+                    st.error(
+                        "Belum bisa diajukan - persentase Komponen Penilaian belum pas "
+                        "(cek tab 'Komponen Penilaian'):\n"
+                        + "\n".join(f"- {msg}" for msg in issues)
+                    )
+                else:
+                    try:
+                        ajukan_rps(client, st.session_state["_rps_id"])
+                        st.session_state["_rps_status"] = "diajukan"
+                        st.session_state["_rps_catatan"] = None
+                        st.session_state["_rps_diajukan_pada"] = datetime.now().isoformat()
+                        st.success("RPS diajukan ke Kaprodi untuk direview.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal mengajukan: {e}")
+    else:
+        st.info(
+            f"RPS berstatus **{status_label.get(status_saat_ini, status_saat_ini)}** - "
+            "isian dikunci, tidak bisa disimpan ulang."
+        )
+        if status_saat_ini == "diajukan":
+            st.caption("Menunggu review Kaprodi.")
+            if st.button("↩️ Tarik Pengajuan", key="tarik_btn", use_container_width=True):
+                try:
+                    tarik_pengajuan_rps(client, st.session_state["_rps_id"])
+                    st.session_state["_rps_status"] = "draft"
+                    st.session_state["_rps_diajukan_pada"] = None
+                    st.success("Pengajuan ditarik, kembali ke status Draft dan bisa diedit lagi.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal menarik pengajuan: {e}")
+
+    with st.expander("📦 Cadangan lokal (opsional, format Excel)"):
+        st.caption(
+            "Simpan ke Database di atas sudah jadi penyimpanan utama - bagian "
+            "ini murni opsional untuk cadangan pribadi, atau mengimpor progres "
+            "lama dari sebelum fitur database ini ada."
+        )
+        st.download_button(
+            "Unduh Cadangan (.xlsx)", data=serialize_progress_excel(mk_row),
+            file_name=f"progres_{mk_row['Kode MK']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_progress_btn",
+        )
+        up = st.file_uploader("Impor dari Cadangan Lama (.xlsx)", type=["xlsx"], key="progress_uploader")
+        if up is not None:
+            file_fingerprint = f"{up.name}_{up.size}"
+            if st.session_state.get("_last_loaded_progress_file") != file_fingerprint:
+                try:
+                    load_progress_excel(up)
+                    st.session_state["_last_loaded_progress_file"] = file_fingerprint
+                    st.success("Progres dimuat. Jangan lupa klik 'Simpan ke Database' di atas untuk menyimpannya permanen.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal memuat progres: {type(e).__name__}: {e}")
+                    st.caption(
+                        "Pastikan file yang diunggah adalah hasil tombol 'Unduh Cadangan (.xlsx)' "
+                        "dari aplikasi ini (bukan file Excel lain, dan bukan hasil ekspor RPS)."
+                    )
 
     st.divider()
     st.subheader("🤖 Asisten AI (Gemini)")
@@ -528,27 +805,37 @@ def mk_key(suffix):
 
 
 tab_info, tab_cpl, tab_pertemuan, tab_ref, tab_nilai, tab_export = st.tabs(
-    ["Info Umum", "CPL & CPMK", "16 Pertemuan", "Referensi", "Komponen Penilaian", "Pratinjau & Ekspor"]
+    ["Info Umum", "CPL & CPMK", "16 Pertemuan", "Daftar Pustaka", "Komponen Penilaian", "Pratinjau & Ekspor"]
 )
 
 # --- Tab: Info Umum ---
 with tab_info:
     st.subheader("Informasi Umum RPS")
     info = st.session_state.info_umum
-    c1, c2 = st.columns(2)
-    info["dosen_koordinator"] = c1.text_input(
-        "Dosen Koordinator", info["dosen_koordinator"], key=mk_key("dosen_koordinator"),
+    info["dosen_koordinator"] = st.text_input(
+        "Dosen Pengembang RPS (Koordinator)", info["dosen_koordinator"], key=mk_key("dosen_koordinator"),
         help="Terisi otomatis dari kolom 'Dosen Pengembang' di data master Mata Kuliah, boleh diedit.",
     )
-    info["dosen_pengampu"] = c2.text_input(
-        "Dosen Pengampu (Anggota)", info["dosen_pengampu"], key=mk_key("dosen_pengampu"),
+    st.caption(
+        "ℹ️ Field **Dosen Pengampu** di dokumen sekarang otomatis diisi nama akun yang "
+        "sedang mengunduh dokumen (lihat tab Pratinjau & Ekspor), tidak lagi diisi manual di sini."
     )
     info["deskripsi_mk"] = st.text_area(
         "Deskripsi Mata Kuliah", info["deskripsi_mk"], key=mk_key("deskripsi_mk"),
     )
-    col1, col2 = st.columns(2)
-    info["media"] = col1.text_area("Media Pembelajaran", info["media"], height=100, key=mk_key("media"))
-    info["modus"] = col2.text_area("Perangkat Lunak/Laboratorium", info["modus"], height=100, key=mk_key("modus"))
+
+    st.divider()
+    st.subheader("Rumpun Mata Kuliah")
+    info["rumpun_mk"] = st.text_input(
+        "Rumpun MK (RMK)", info["rumpun_mk"], key=mk_key("rumpun_mk"),
+    )
+
+    st.divider()
+    st.subheader("Ketua Prodi")
+    info["nama_kaprodi"] = st.text_input(
+        "Nama Ketua Prodi", info["nama_kaprodi"], key=mk_key("nama_kaprodi"),
+        help="Terisi otomatis dari config/pejabat.txt, boleh diedit. Muncul di QR Kaprodi pada dokumen.",
+    )
 
 # --- Tab: CPL & CPMK ---
 with tab_cpl:
@@ -631,9 +918,15 @@ with tab_pertemuan:
     cpmk_ref_options = ["-"] + [f"CPMK-{i}" for i in range(1, 6)]
     for m in range(1, N_MINGGU + 1):
         p = st.session_state.pertemuan_data[m]
-        label = f"Minggu {m}" + (" (UTS)" if m == 8 else " (UAS)" if m == 16 else "")
+        is_ujian = m in (8, 16)
+        label = f"Minggu {m}" + (" 🔴 UTS" if m == 8 else " 🔴 UAS" if m == 16 else "")
         preview = p["sub_cpmk_desc"] or p["materi"] or "belum diisi"
         with st.expander(f"{label}: {preview[:60]}{'…' if len(preview) > 60 else ''}"):
+            if is_ujian:
+                st.warning(
+                    f"Minggu ujian ({'UTS' if m == 8 else 'UAS'}) - field Sub-CPMK sudah "
+                    "diisi teks standar, boleh diedit/ditambah cakupan materinya."
+                )
             current_ref = p["cpmk_ref"] or "-"
             ref_choice = st.selectbox(
                 "CPMK Ref", cpmk_ref_options,
@@ -690,8 +983,7 @@ with tab_pertemuan:
                     st.info(
                         "**Saran AI** (tinjau dulu, belum diterapkan ke field di bawah):\n\n"
                         f"**Materi:** {suggestion.get('materi', '-')}\n\n"
-                        f"**Tugas:** {suggestion.get('tugas', '-')}\n\n"
-                        f"**Kriteria:** {suggestion.get('kriteria', '-')}\n\n"
+                        f"**Bentuk Asesmen:** {suggestion.get('bentuk_asesmen', '-')}\n\n"
                         f"**Indikator:** {suggestion.get('indikator', '-')}\n\n"
                         f"**Bloom:** {', '.join(suggestion.get('bloom', [])) or '-'}\n\n"
                         f"**Bentuk Online:** {', '.join(suggestion.get('bentuk', [])) or '-'}"
@@ -699,15 +991,13 @@ with tab_pertemuan:
                     ca, cb = st.columns(2)
                     if ca.button("✅ Terapkan Saran", key=mk_key(f"ai_apply_{m}")):
                         new_materi = suggestion.get("materi", p["materi"])
-                        new_tugas = suggestion.get("tugas", p["tugas"])
-                        new_kriteria = suggestion.get("kriteria", p["kriteria"])
+                        new_bentuk_asesmen = suggestion.get("bentuk_asesmen", p["bentuk_asesmen"])
                         new_indikator = suggestion.get("indikator", p["indikator"])
                         new_bloom = [b for b in suggestion.get("bloom", []) if b in BLOOM_LEVELS] or p["bloom"]
                         new_bentuk = [b for b in suggestion.get("bentuk", []) if b in BENTUK_OPTIONS] or p["bentuk"]
                         # Tulis ke data kita sendiri...
                         p["materi"] = new_materi
-                        p["tugas"] = new_tugas
-                        p["kriteria"] = new_kriteria
+                        p["bentuk_asesmen"] = new_bentuk_asesmen
                         p["indikator"] = new_indikator
                         p["bloom"] = new_bloom
                         p["bentuk"] = new_bentuk
@@ -716,8 +1006,7 @@ with tab_pertemuan:
                         # yang kita berikan, begitu key tersebut pernah dibuat. Tanpa baris ini
                         # perubahan tidak akan pernah muncul di kotak teksnya.
                         st.session_state[mk_key(f"prt_materi_{m}")] = new_materi
-                        st.session_state[mk_key(f"prt_tugas_{m}")] = new_tugas
-                        st.session_state[mk_key(f"prt_kriteria_{m}")] = new_kriteria
+                        st.session_state[mk_key(f"prt_bentuk_asesmen_{m}")] = new_bentuk_asesmen
                         st.session_state[mk_key(f"prt_indikator_{m}")] = new_indikator
                         st.session_state[mk_key(f"prt_bloom_{m}")] = new_bloom
                         st.session_state[mk_key(f"prt_bentuk_{m}")] = new_bentuk
@@ -741,44 +1030,61 @@ with tab_pertemuan:
                 "Bentuk Pembelajaran Online", BENTUK_OPTIONS, default=p["bentuk"], key=mk_key(f"prt_bentuk_{m}"),
                 help=info_tooltip(BENTUK_INFO),
             )
-            p["tugas"] = st.text_area("Deskripsi Tugas/Quiz/Assignment", p["tugas"], key=mk_key(f"prt_tugas_{m}"))
             c5, c6 = st.columns(2)
-            p["kriteria"] = c5.text_area("Kriteria Penilaian", p["kriteria"], key=mk_key(f"prt_kriteria_{m}"))
+            p["bentuk_asesmen"] = c5.text_area(
+                "Bentuk Asesmen Penilaian", p["bentuk_asesmen"], key=mk_key(f"prt_bentuk_asesmen_{m}"),
+                help="Mis. kuis pilihan ganda, tugas individu, presentasi kelompok.",
+            )
             p["indikator"] = c6.text_area("Indikator Penilaian", p["indikator"], key=mk_key(f"prt_indikator_{m}"))
-            c7, c8 = st.columns(2)
-            p["referensi"] = c7.text_input("Referensi (nomor, pisah koma)", p["referensi"], key=mk_key(f"prt_ref_{m}"))
-            p["bobot"] = c8.number_input("Bobot Penilaian (%)", 0, 100, p["bobot"], key=mk_key(f"prt_bobot_{m}"))
 
-# --- Tab: Referensi ---
+# --- Tab: Daftar Pustaka ---
 with tab_ref:
-    st.subheader("Daftar Referensi")
+    st.subheader("Daftar Pustaka")
+    st.caption("Tautan materi/buku jika tersedia online.")
     for idx, ref in enumerate(st.session_state.referensi_data):
         c1, c2 = st.columns([6, 1])
-        ref["sitasi"] = c1.text_input(f"Referensi #{idx + 1}", ref["sitasi"], key=mk_key(f"ref_{idx}"))
+        ref["sitasi"] = c1.text_input(f"Pustaka #{idx + 1}", ref["sitasi"], key=mk_key(f"ref_{idx}"))
         if c2.button("Hapus", key=mk_key(f"ref_del_{idx}")):
             st.session_state.referensi_data.pop(idx)
             st.rerun()
-    if st.button("➕ Tambah Referensi", key=mk_key("tambah_referensi")):
+    if st.button("➕ Tambah Pustaka", key=mk_key("tambah_referensi")):
         st.session_state.referensi_data.append({"sitasi": ""})
         st.rerun()
 
-# --- Tab: Komponen Penilaian (radio per CPMK, bebas isu 2x klik data_editor) ---
+# --- Tab: Komponen Penilaian (bagi persentase tiap kategori ke 5 CPMK) ---
 with tab_nilai:
     st.subheader("Komponen Penilaian")
     st.caption(
-        "Pilih satu kategori penilaian untuk tiap CPMK. Satu kategori boleh dipakai oleh "
-        "lebih dari satu CPMK, tapi satu CPMK hanya boleh masuk satu kategori."
+        "Untuk tiap komponen, bagi persentase bobotnya ke CPMK yang dinilai lewat "
+        "komponen tsb. **Total tiap komponen (dijumlah dari 5 CPMK) harus PAS sama "
+        "dengan bobotnya** - tidak boleh lebih atau kurang. CPMK yang tidak dinilai "
+        "lewat komponen tertentu, biarkan 0."
     )
-    for i in range(1, 6):
-        current = st.session_state.komponen_data.get(i)
-        idx = KATEGORI_PENILAIAN.index(current) if current in KATEGORI_PENILAIAN else 0
-        choice = st.radio(
-            f"CPMK-{i}", KATEGORI_PENILAIAN, index=idx, horizontal=True,
-            key=mk_key(f"komp_radio_{i}"),
-        )
-        st.session_state.komponen_data[i] = choice
 
-    st.divider()
+    for kategori in KATEGORI_PENILAIAN:
+        target = BOBOT_KATEGORI.get(kategori, 0)
+        st.markdown(f"**{kategori}** — bobot total {target}%")
+        cols = st.columns(5)
+        total_kategori = 0
+        for i in range(1, 6):
+            row = st.session_state.komponen_data.setdefault(i, {kat: 0 for kat in KATEGORI_PENILAIAN})
+            with cols[i - 1]:
+                nilai = st.number_input(
+                    f"CPMK-{i}", min_value=0, max_value=100, value=int(row.get(kategori, 0)),
+                    step=5, key=mk_key(f"komp_{kategori}_{i}"),
+                )
+            row[kategori] = nilai
+            total_kategori += nilai
+
+        selisih = target - total_kategori
+        if selisih == 0:
+            st.success(f"Total: {total_kategori}% dari {target}% ✅")
+        elif selisih > 0:
+            st.warning(f"Total: {total_kategori}% dari {target}% (kurang {selisih}%)")
+        else:
+            st.error(f"Total: {total_kategori}% dari {target}% (kelebihan {abs(selisih)}%)")
+        st.divider()
+
     st.markdown("**Bobot Komponen Penilaian (baku):**")
     cols = st.columns(4)
     for idx, (k, v) in enumerate(BOBOT_KATEGORI.items()):
@@ -801,39 +1107,28 @@ with tab_export:
         ]), use_container_width=True, hide_index=True)
 
         st.divider()
-        st.subheader("Validasi Dokumen")
+        tgl_pengajuan = format_tanggal_indonesia(st.session_state.get("_rps_diajukan_pada"))
+        tgl_tampil = tgl_pengajuan or "(belum diajukan)"
+        nama_pengunduh = pengguna.get("nama") or pengguna.get("email")
         st.caption(
-            "Nama-nama ini akan muncul di blok tanda tangan pada bagian akhir dokumen (tanpa QR code, "
-            "ruang kosong disediakan untuk tanda tangan fisik). Kaprodi, Koordinator, dan Kepala Biro "
-            "Penjaminan Mutu terisi otomatis dari data master/`config/pejabat.txt`, boleh diedit."
-        )
-        info = st.session_state.info_umum
-        info["tanggal_dokumen"] = st.text_input(
-            "Tanggal Dokumen (mis. 28/10/2025)", info["tanggal_dokumen"], key=mk_key("tanggal_dokumen"),
-        )
-        vc1, vc2, vc3 = st.columns(3)
-        info["nama_kaprodi"] = vc1.text_input(
-            "Nama Ketua Prodi", info["nama_kaprodi"], key=mk_key("nama_kaprodi"),
-            help="Terisi otomatis dari config/pejabat.txt (baris KAPRODI_<Nama Prodi>), boleh diedit.",
-        )
-        info["nama_koordinator"] = vc2.text_input(
-            "Nama Koordinator MK/Bidang Keahlian", info["nama_koordinator"], key=mk_key("nama_koordinator"),
-            help="Terisi otomatis dari kolom 'Dosen Pengembang' di data master Mata Kuliah, boleh diedit.",
-        )
-        info["nama_penyusun"] = vc3.text_input(
-            "Nama Dosen Penyusun", info["nama_penyusun"], key=mk_key("nama_penyusun"),
-        )
-        info["nama_biro_pjm"] = st.text_input(
-            "Nama Kepala Biro Penjaminan Mutu", info["nama_biro_pjm"], key=mk_key("nama_biro_pjm"),
-            help="Terisi otomatis dari config/pejabat.txt (baris KABIRO_PENJAMINAN_MUTU), boleh diedit.",
+            f"📅 **Tanggal Penyusunan** (di dokumen): {tgl_tampil} — otomatis mengikuti "
+            "tanggal RPS ini diajukan ke Kaprodi, tidak bisa diedit manual.\n\n"
+            f"👤 **Dosen Pengampu** (di dokumen): {nama_pengunduh} — otomatis mengikuti akun "
+            "yang sedang mengunduh dokumen ini."
         )
 
-        st.divider()
+        # Salinan info_umum KHUSUS untuk diekspor - tanggal & dosen pengampu dihitung
+        # ulang di sini (bukan disimpan permanen di data RPS), supaya tidak perlu
+        # duplikasi state dan selalu konsisten dengan kondisi RPS terkini.
+        info_export = dict(st.session_state.info_umum)
+        info_export["tanggal_dokumen"] = tgl_tampil
+        info_export["dosen_pengampu"] = nama_pengunduh
+
         col1, col2 = st.columns(2)
         with col1:
             docx_buf = build_docx(
                 prodi=st.session_state.prodi_sel, mk_row=mk_row, cpl_df=cpl_df,
-                info_umum=st.session_state.info_umum, cpmk_data=st.session_state.cpmk_data,
+                info_umum=info_export, cpmk_data=st.session_state.cpmk_data,
                 pertemuan_data=st.session_state.pertemuan_data,
                 referensi_data=st.session_state.referensi_data,
                 komponen_data=st.session_state.komponen_data,
@@ -844,14 +1139,22 @@ with tab_export:
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                 key="download_docx_btn")
         with col2:
-            pdf_buf = build_pdf(
-                prodi=st.session_state.prodi_sel, mk_row=mk_row, cpl_df=cpl_df,
-                info_umum=st.session_state.info_umum, cpmk_data=st.session_state.cpmk_data,
-                pertemuan_data=st.session_state.pertemuan_data,
-                referensi_data=st.session_state.referensi_data,
-                komponen_data=st.session_state.komponen_data,
-                bobot_kategori=BOBOT_KATEGORI,
-            )
-            st.download_button("⬇️ Unduh PDF", data=pdf_buf,
-                                file_name=f"RPS_{mk_row['Kode MK']}.pdf", mime="application/pdf",
-                                key="download_pdf_btn")
+            if find_soffice() is None:
+                st.warning(
+                    "PDF butuh LibreOffice terpasang di komputer ini (supaya PDF-nya dijamin identik "
+                    "dengan Word, karena dibuat dengan mengonversi file Word yang sama, bukan dibangun "
+                    "terpisah). Unduh & pasang dulu dari [libreoffice.org/download]"
+                    "(https://www.libreoffice.org/download/download/), lalu restart aplikasi ini. "
+                    "Word (.docx) di sebelah kiri tetap bisa diunduh tanpa LibreOffice."
+                )
+            else:
+                docx_buf.seek(0)
+                pdf_buf = build_pdf_via_libreoffice(docx_buf)
+                docx_buf.seek(0)
+                if pdf_buf is None:
+                    st.error("Gagal membuat PDF (LibreOffice ditemukan tapi konversi gagal). Coba lagi, "
+                              "atau unduh versi Word-nya dan simpan-sebagai-PDF secara manual dari Word.")
+                else:
+                    st.download_button("⬇️ Unduh PDF", data=pdf_buf,
+                                        file_name=f"RPS_{mk_row['Kode MK']}.pdf", mime="application/pdf",
+                                        key="download_pdf_btn")

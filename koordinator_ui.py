@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+"""
+Penyesuaian: UI penetapan Koordinator Mata Kuliah - dipakai bersama oleh
+admin_panel.py (tab "🎓 Koordinator") dan kaprodi_panel.py, supaya logikanya
+tidak ditulis dua kali.
+
+Hanya Dosen yang ditetapkan sebagai koordinator suatu Mata Kuliah yang boleh
+mengisi/mengubah RPS-nya - lihat sql/schema.sql bagian "Koordinator Mata
+Kuliah" untuk aturan aksesnya di level database.
+"""
+
+import streamlit as st
+
+from db_master import list_dosen, list_whitelist_menunggu, load_master_db, set_koordinator_mk
+
+BELUM_DITETAPKAN = "(belum ditetapkan)"
+
+
+def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
+    st.caption(
+        "Tetapkan satu Dosen sebagai koordinator per Mata Kuliah - HANYA Dosen yang "
+        "ditetapkan di sini yang bisa mengisi RPS untuk Mata Kuliah tsb. Mata Kuliah "
+        "yang belum ditetapkan koordinatornya terkunci untuk semua Dosen. Dosen yang "
+        "belum sempat Daftar akun juga bisa dipilih (dari daftar pra-pendaftaran) - "
+        "penugasannya otomatis tersambung begitu mereka Daftar."
+    )
+
+    mk_df, _ = load_master_db(client, prodi_id, tahun_kurikulum)
+    if mk_df.empty:
+        st.info(f"Belum ada Mata Kuliah di Prodi ini untuk kurikulum {tahun_kurikulum}.")
+        return
+
+    dosen_rows = list_dosen(client)
+    label_by_id = {d["id"]: (d.get("nama") or d["email"]) for d in dosen_rows}
+    id_by_label = {v: k for k, v in label_by_id.items()}
+
+    menunggu_rows = list_whitelist_menunggu(client)
+    label_by_nip = {w["nip"]: f"{w['nama']} (NIP {w['nip']}, belum Daftar)" for w in menunggu_rows}
+    nip_by_label = {v: k for k, v in label_by_nip.items()}
+
+    dosen_options = [BELUM_DITETAPKAN] + list(id_by_label.keys()) + list(label_by_nip.values())
+
+    for _, mk in mk_df.iterrows():
+        with st.container(border=True):
+            col1, col2, col3 = st.columns([3, 3, 1])
+            with col1:
+                st.markdown(f"**{mk['Kode MK']}** · {mk['Nama Mata Kuliah']}")
+            with col2:
+                koor_id = mk.get("koordinator_user_id")
+                koor_nip = mk.get("koordinator_nip")
+                if koor_id:
+                    current_label = label_by_id.get(koor_id, BELUM_DITETAPKAN)
+                elif koor_nip:
+                    current_label = label_by_nip.get(koor_nip, f"(NIP {koor_nip}, belum Daftar)")
+                else:
+                    current_label = BELUM_DITETAPKAN
+                pilihan = st.selectbox(
+                    "Koordinator", dosen_options,
+                    index=dosen_options.index(current_label) if current_label in dosen_options else 0,
+                    key=f"koor_{mk['id']}", label_visibility="collapsed",
+                )
+            with col3:
+                st.write("")
+                if st.button("💾", key=f"save_koor_{mk['id']}", help="Simpan koordinator"):
+                    try:
+                        if pilihan in id_by_label:
+                            set_koordinator_mk(client, mk["id"], koordinator_id=id_by_label[pilihan])
+                        elif pilihan in nip_by_label:
+                            set_koordinator_mk(client, mk["id"], koordinator_nip=nip_by_label[pilihan])
+                        else:
+                            set_koordinator_mk(client, mk["id"])
+                        st.success("Koordinator diperbarui.")
+                        load_master_db.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal memperbarui: {e}")

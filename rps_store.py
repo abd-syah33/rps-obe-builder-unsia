@@ -1,0 +1,143 @@
+# -*- coding: utf-8 -*-
+"""
+Fase 4: baca/tulis dokumen RPS ke tabel `rps` di Supabase - menggantikan
+mekanisme "Unduh/Muat Progres (.xlsx)" manual dengan penyimpanan otomatis ke
+database (tidak hilang kalau browser ditutup).
+
+Satu baris `rps` = satu dokumen (kombinasi mata_kuliah_id + dosen_user_id,
+dijaga unik lewat index `ux_rps_mata_kuliah_dosen` di sql/schema.sql bagian
+FASE 4). Kolom `data` (JSONB) berisi persis isi session_state yang dulu
+diserialisasi ke Excel - lihat state_to_rps_data()/apply_rps_data_to_state()
+di app.py untuk konversi ke/dari bentuk ini.
+"""
+
+import streamlit as st
+
+
+def load_rps(client, mata_kuliah_id):
+    """Satu Mata Kuliah = satu dokumen RPS (dimiliki siapa pun yang SAAT INI
+    jadi koordinatornya - lihat mata_kuliah.koordinator_user_id). Kembalikan
+    None kalau belum pernah diisi sama sekali."""
+    resp = (
+        client.table("rps")
+        .select("id, data, status, catatan_kaprodi, diajukan_pada, diproses_pada, created_at, updated_at")
+        .eq("mata_kuliah_id", mata_kuliah_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def save_rps(client, mata_kuliah_id, dosen_user_id, data):
+    """Simpan (insert kalau baru, update kalau sudah ada) isi RPS. `status`
+    SENGAJA tidak disertakan di payload supaya tidak ikut ter-timpa balik ke
+    default saat menyimpan draft biasa - perubahan status (mis. "diajukan")
+    ditangani terpisah lewat rps_store.ajukan_rps() dkk. `dosen_user_id`
+    dicatat sebagai siapa yang terakhir menyimpan (dijamin = koordinator saat
+    ini oleh RLS - lihat sql/schema.sql). Upsert berdasarkan mata_kuliah_id
+    SAJA (satu Mata Kuliah = satu RPS, siapa pun koordinatornya)."""
+    payload = {
+        "mata_kuliah_id": mata_kuliah_id,
+        "dosen_user_id": dosen_user_id,
+        "data": data,
+    }
+    resp = client.table("rps").upsert(payload, on_conflict="mata_kuliah_id").execute()
+    return resp.data[0] if resp.data else None
+
+
+@st.cache_data(ttl=15)
+def list_my_rps(_client, user_id):
+    """Semua Mata Kuliah yang koordinatornya SAAT INI adalah user ini, beserta
+    RPS-nya kalau sudah pernah diisi (kalau belum, "rps" akan kosong - tetap
+    ditampilkan supaya Dosen tahu Mata Kuliah mana yang perlu diisi). Berbasis
+    penugasan koordinator saat ini, BUKAN riwayat siapa yang pernah mengisi -
+    kalau koordinator diganti, Mata Kuliah itu otomatis hilang dari daftar
+    koordinator lama dan muncul di koordinator baru."""
+    resp = (
+        _client.table("mata_kuliah")
+        .select("id, nama_mk, kode_mk, tahun_kurikulum, prodi(nama), rps(id, status, updated_at, catatan_kaprodi)")
+        .eq("koordinator_user_id", user_id)
+        .execute()
+    )
+    return resp.data or []
+
+
+@st.cache_data(ttl=15)
+def load_riwayat(_client, rps_id, limit=10):
+    """Daftar snapshot riwayat perubahan untuk satu RPS (dari tabel
+    rps_riwayat, diisi otomatis lewat trigger - lihat sql/schema.sql FASE 4)."""
+    resp = (
+        _client.table("rps_riwayat")
+        .select("id, status, diubah_pada")
+        .eq("rps_id", rps_id)
+        .order("diubah_pada", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return resp.data or []
+
+
+# --------------------------------------------------------------------------
+# Fase 5: transisi status (Dosen: ajukan/tarik; Kaprodi/Admin: setujui/tolak).
+# Semua lewat fungsi database (RPC) SECURITY DEFINER di sql/schema.sql, BUKAN
+# update langsung ke tabel rps - otorisasi & validasi dilakukan di sana.
+# --------------------------------------------------------------------------
+def ajukan_rps(client, rps_id):
+    client.rpc("ajukan_rps", {"target_rps_id": rps_id}).execute()
+
+
+def tarik_pengajuan_rps(client, rps_id):
+    client.rpc("tarik_pengajuan_rps", {"target_rps_id": rps_id}).execute()
+
+
+def setujui_rps(client, rps_id, catatan=None):
+    client.rpc("setujui_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
+
+
+def tolak_rps(client, rps_id, catatan):
+    client.rpc("tolak_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
+
+
+@st.cache_data(ttl=15)
+def list_diajukan(_client):
+    """RPS berstatus 'diajukan' yang boleh dilihat pengguna yang login saat
+    ini - RLS otomatis membatasi ke RPS di prodi yang diampu untuk Kaprodi,
+    atau semua untuk Admin (lihat policy "kaprodi & admin baca rps"). Nama
+    Dosen diambil dari isi dokumen RPS-nya sendiri (info_umum), bukan dari
+    tabel pengguna - lebih sederhana & tidak perlu izin baca lintas-akun."""
+    resp = (
+        _client.table("rps")
+        .select("id, status, updated_at, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi(nama))")
+        .eq("status", "diajukan")
+        .order("updated_at")
+        .execute()
+    )
+    return resp.data or []
+
+
+@st.cache_data(ttl=15)
+def get_rps_stats(_client):
+    """Data mentah untuk dashboard statistik Admin: satu baris per RPS berisi
+    status & nama Prodi-nya. Diagregasi di sisi Python (lihat admin_panel.py)
+    - jumlahnya kecil (skala menengah), jadi tidak perlu agregasi di SQL."""
+    resp = _client.table("rps").select("status, mata_kuliah(prodi(nama))").execute()
+    return resp.data or []
+
+
+@st.cache_data(ttl=30)
+def list_disetujui(_client):
+    """RPS berstatus 'disetujui' - RLS mengizinkan SEMUA Dosen yang login
+    membacanya (transparansi kurikulum: RPS resmi yang sudah disahkan boleh
+    dilihat & diunduh siapa saja, draft/diajukan/ditolak tetap privat).
+    Lihat policy "semua dosen baca rps disetujui" di sql/schema.sql."""
+    resp = (
+        _client.table("rps")
+        .select(
+            "id, status, updated_at, diajukan_pada, diproses_pada, data, "
+            "mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, sks, semester, prodi_id, prodi(nama))"
+        )
+        .eq("status", "disetujui")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    return resp.data or []

@@ -9,15 +9,20 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
-# Konfigurasi berisi API key asli — JANGAN pernah di-commit.
+# Konfigurasi berisi API key asli, JANGAN pernah di-commit.
 # Yang ikut ter-commit hanya template-nya: config/gemini_default.txt.example
 config/gemini_default.txt
-.agent/skills
-.claude/skills
 
-# Nama pejabat (personalisasi lokal per institusi) — yang ikut ter-commit
+# Nama pejabat (personalisasi lokal per institusi): yang ikut ter-commit
 # hanya template-nya: config/pejabat.txt.example
 config/pejabat.txt
+
+# Lokasi soffice.exe (khusus komputer masing-masing, tidak relevan untuk orang lain)
+config/soffice_path.txt
+
+# Kredensial Supabase asli, JANGAN pernah di-commit.
+# Yang ikut ter-commit hanya template-nya: config/supabase.txt.example
+config/supabase.txt
 
 # OS/editor
 .DS_Store
