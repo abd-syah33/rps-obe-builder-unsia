@@ -54,24 +54,39 @@ DEFAULT_GEMINI_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "
 
 
 def load_default_gemini_config():
-    """Baca config/gemini_default.txt -> {'api_key': ..., 'model': ...} (string kosong kalau tidak ada)."""
+    """Baca config/gemini_default.txt -> {'api_key': ..., 'model': ...}, dengan
+    fallback ke st.secrets (fitur "Secrets" Streamlit Community Cloud) kalau
+    file lokal tidak ada/kosong - config/gemini_default.txt sengaja di-gitignore
+    jadi tidak akan ada sama sekali di server Cloud. Format di Secrets:
+
+        GEMINI_API_KEY = "xxxx"
+        GEMINI_MODEL = "gemini-2.0-flash"
+    """
     result = {"api_key": "", "model": "gemini-2.0-flash"}
-    if not os.path.exists(DEFAULT_GEMINI_CONFIG_PATH):
-        return result
-    try:
-        with open(DEFAULT_GEMINI_CONFIG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key, value = key.strip(), value.strip()
-                if key == "GEMINI_API_KEY" and value:
-                    result["api_key"] = value
-                elif key == "GEMINI_MODEL" and value:
-                    result["model"] = value
-    except Exception:
-        pass
+    if os.path.exists(DEFAULT_GEMINI_CONFIG_PATH):
+        try:
+            with open(DEFAULT_GEMINI_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key, value = key.strip(), value.strip()
+                    if key == "GEMINI_API_KEY" and value:
+                        result["api_key"] = value
+                    elif key == "GEMINI_MODEL" and value:
+                        result["model"] = value
+        except Exception:
+            pass
+
+    if not result["api_key"]:
+        try:
+            if st.secrets.get("GEMINI_API_KEY"):
+                result["api_key"] = st.secrets["GEMINI_API_KEY"]
+            if st.secrets.get("GEMINI_MODEL"):
+                result["model"] = st.secrets["GEMINI_MODEL"]
+        except Exception:
+            pass
     return result
 
 
@@ -79,25 +94,42 @@ PEJABAT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "pejabat
 
 
 def load_pejabat_config():
-    """Baca config/pejabat.txt -> {'kabiro': ..., 'kaprodi': {nama_prodi: nama_kaprodi}}."""
+    """Baca config/pejabat.txt -> {'kabiro': ..., 'kaprodi': {nama_prodi: nama_kaprodi}},
+    dengan fallback ke st.secrets (Streamlit Community Cloud) kalau file lokal
+    tidak ada/kosong. Format di Secrets (perhatikan [KAPRODI] sebagai tabel
+    TOML, beda dari KABIRO_PENJAMINAN_MUTU yang baris biasa):
+
+        KABIRO_PENJAMINAN_MUTU = "Dr. Nama Kabiro"
+
+        [KAPRODI]
+        "Informatika PJJ S1" = "Dr. Nama Kaprodi"
+    """
     result = {"kabiro": "", "kaprodi": {}}
-    if not os.path.exists(PEJABAT_CONFIG_PATH):
-        return result
-    try:
-        with open(PEJABAT_CONFIG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key, value = key.strip(), value.strip()
-                if key == "KABIRO_PENJAMINAN_MUTU" and value:
-                    result["kabiro"] = value
-                elif key.startswith("KAPRODI_") and value:
-                    nama_prodi = key[len("KAPRODI_"):]
-                    result["kaprodi"][nama_prodi] = value
-    except Exception:
-        pass
+    if os.path.exists(PEJABAT_CONFIG_PATH):
+        try:
+            with open(PEJABAT_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key, value = key.strip(), value.strip()
+                    if key == "KABIRO_PENJAMINAN_MUTU" and value:
+                        result["kabiro"] = value
+                    elif key.startswith("KAPRODI_") and value:
+                        nama_prodi = key[len("KAPRODI_"):]
+                        result["kaprodi"][nama_prodi] = value
+        except Exception:
+            pass
+
+    if not result["kabiro"] and not result["kaprodi"]:
+        try:
+            if st.secrets.get("KABIRO_PENJAMINAN_MUTU"):
+                result["kabiro"] = st.secrets["KABIRO_PENJAMINAN_MUTU"]
+            if "KAPRODI" in st.secrets:
+                result["kaprodi"] = dict(st.secrets["KAPRODI"])
+        except Exception:
+            pass
     return result
 
 BLOOM_LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6"]
