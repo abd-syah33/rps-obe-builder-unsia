@@ -1239,3 +1239,59 @@ begin
     end if;
 end;
 $$;
+
+
+-- =============================================================================
+-- PENYESUAIAN: Nama Koordinator/Kaprodi/BPM & Rumpun MK ditarik OTOMATIS dari
+-- database (bukan diketik manual/dari config/pejabat.txt lagi) saat mengisi RPS.
+-- =============================================================================
+
+-- Ganti nama kolom "ranah_topik" jadi "rumpun_mk" - konsep yang sama, cuma
+-- istilahnya disamakan dengan yang dipakai di form/dokumen RPS. Tidak perlu
+-- migrasi data terpisah - RENAME COLUMN otomatis mempertahankan isi. Dibungkus
+-- pengecekan supaya aman dijalankan ulang (kolom "ranah_topik" sudah tidak
+-- ada lagi setelah rename pertama - tanpa pengecekan ini, ALTER akan gagal
+-- kalau seluruh file ini dijalankan ulang, melanggar pola idempotent yang
+-- dipegang di seluruh file ini).
+do $$
+begin
+    if exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'mata_kuliah' and column_name = 'ranah_topik'
+    ) then
+        alter table public.mata_kuliah rename column ranah_topik to rumpun_mk;
+    end if;
+end $$;
+
+-- RPC khusus untuk Dosen BIASA (bukan admin/kaprodi) bisa tahu nama Kaprodi
+-- Prodi-nya & nama BPM, TANPA perlu akses baca penuh ke tabel pengguna orang
+-- lain (policy pengguna saat ini cuma izinkan baca profil sendiri + admin/
+-- kaprodi baca semua - Dosen biasa TIDAK match salah satu dari itu untuk
+-- baris milik orang lain). SECURITY DEFINER supaya bisa baca lintas baris,
+-- tapi cakupannya SENGAJA dipersempit HANYA nama+email, bukan seluruh kolom.
+create or replace function public.get_pejabat_prodi(target_prodi_id uuid)
+returns table(kaprodi_nama text, kaprodi_email text)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select nama, email from public.pengguna
+    where role = 'kaprodi' and prodi_id = target_prodi_id
+    limit 1;
+$$;
+
+create or replace function public.get_pejabat_bpm()
+returns table(bpm_nama text, bpm_email text)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select nama, email from public.pengguna
+    where role = 'bpm'
+    limit 1;
+$$;
+
+grant execute on function public.get_pejabat_prodi(uuid) to authenticated;
+grant execute on function public.get_pejabat_bpm() to authenticated;
