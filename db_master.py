@@ -148,18 +148,50 @@ def _clean_int(value):
     return int(value)
 
 
-def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df):
+def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df, original_df):
     """Upsert semua baris di edited_df (hasil st.data_editor) ke tabel
     mata_kuliah, untuk satu prodi_id + tahun_kurikulum tertentu. Baris dengan
     "Nama Mata Kuliah" kosong dilewati (baris kosong sisa dari data_editor).
     Upsert dicocokkan lewat (kode_mk, tahun_kurikulum) - Kode MK unik PER
     TAHUN KURIKULUM (Mata Kuliah Umum lintas Prodi sudah dikonsolidasi ke
     Prodi "Mata Kuliah Umum" tersendiri, lihat sql/migrate_mata_kuliah_umum.sql).
-    KALAU Kode MK diubah di editor, itu akan membuat baris BARU, bukan
-    mengganti baris lama (batasan yang disengaja, supaya tidak perlu logika
-    diff yang rumit). Hapus baris lama manual lewat SQL Editor kalau memang
-    perlu mengubah Kode MK.
+
+    Penyesuaian: baris yang ADA di original_df (state SEBELUM diedit) tapi
+    SUDAH TIDAK ADA lagi di edited_df (dihapus lewat tombol hapus baris di
+    data_editor) sekarang BENAR-BENAR dihapus dari database - sebelumnya
+    dilewati diam-diam (baris itu muncul lagi setelah reload, membingungkan).
+    Aman karena kolom rps.mata_kuliah_id punya "on delete restrict" - Postgres
+    sendiri akan MENOLAK (bukan diam-diam gagal) kalau Mata Kuliah itu sudah
+    dipakai di RPS manapun; error itu ditangkap di sini dan nama Kode MK-nya
+    dikembalikan lewat `gagal_hapus` supaya pemanggil bisa kasih tahu Admin.
+
+    Efek samping dari logika di atas: KALAU Kode MK diubah di editor (bukan
+    dihapus), kode LAMA-nya kini otomatis ikut coba dihapus (karena sudah
+    tidak ada di edited_df) - kalau kode lama itu TERNYATA belum dipakai di
+    RPS manapun, hasilnya baris lama betulan hilang (diganti baris baru,
+    bukan lagi menyisakan duplikat seperti sebelumnya); kalau SUDAH dipakai,
+    penghapusannya otomatis gagal (masuk daftar gagal_hapus) dan baris lama
+    tetap ada berdampingan dengan baris baru - sama seperti perilaku lama.
     """
+    kode_mk_tersisa = {
+        _clean_str(row.get("Kode MK")) for _, row in edited_df.iterrows()
+        if _clean_str(row.get("Kode MK"))
+    }
+    kode_mk_lama = {
+        _clean_str(row.get("Kode MK")) for _, row in original_df.iterrows()
+        if _clean_str(row.get("Kode MK"))
+    }
+    kode_mk_dihapus = kode_mk_lama - kode_mk_tersisa
+
+    gagal_hapus = []
+    for kode_mk_hapus in kode_mk_dihapus:
+        try:
+            client.table("mata_kuliah").delete().eq("prodi_id", prodi_id).eq(
+                "tahun_kurikulum", tahun_kurikulum
+            ).eq("kode_mk", kode_mk_hapus).execute()
+        except Exception:
+            gagal_hapus.append(kode_mk_hapus)
+
     saved = 0
     for _, row in edited_df.iterrows():
         nama = _clean_str(row.get("Nama Mata Kuliah"))
@@ -177,13 +209,69 @@ def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df):
         }
         client.table("mata_kuliah").upsert(payload, on_conflict="kode_mk,tahun_kurikulum").execute()
         saved += 1
-    return saved
+    return saved, gagal_hapus
 
 
-def save_cpl_df(client, prodi_id, tahun_kurikulum, edited_df):
+def _cpl_kode_terpakai_di_rps(client, prodi_id, tahun_kurikulum, kode_cpl_set):
+    """Dari kode_cpl_set, kembalikan kode mana saja yang MASIH dirujuk sebagai
+    CPL suatu CPMK di RPS manapun untuk Prodi+Tahun Kurikulum ini. Dicek
+    manual (bukan lewat foreign key database) karena rujukan CPMK->CPL cuma
+    berupa teks kode di dalam kolom JSONB rps.data, bukan foreign key
+    sungguhan - jadi database TIDAK bisa mencegah sendiri penghapusan CPL
+    yang masih dipakai."""
+    if not kode_cpl_set:
+        return set()
+    mk_resp = (
+        client.table("mata_kuliah")
+        .select("id")
+        .eq("prodi_id", prodi_id)
+        .eq("tahun_kurikulum", tahun_kurikulum)
+        .execute()
+    )
+    mk_ids = [m["id"] for m in (mk_resp.data or [])]
+    if not mk_ids:
+        return set()
+    rps_resp = client.table("rps").select("data").in_("mata_kuliah_id", mk_ids).execute()
+    terpakai = set()
+    for r in (rps_resp.data or []):
+        cpmk_data = (r.get("data") or {}).get("cpmk_data") or {}
+        for c in cpmk_data.values():
+            kode = (c or {}).get("cpl_kode")
+            if kode in kode_cpl_set:
+                terpakai.add(kode)
+    return terpakai
+
+
+def save_cpl_df(client, prodi_id, tahun_kurikulum, edited_df, original_df):
     """Sama seperti save_mata_kuliah_df, untuk tabel cpl. Cocokkan lewat
-    (prodi_id, kode_cpl, tahun_kurikulum) - ubah Kode CPL = baris baru,
-    bukan mengganti."""
+    (prodi_id, kode_cpl, tahun_kurikulum) - ubah Kode CPL = baris baru
+    (kecuali kode lamanya ternyata aman dihapus - lihat catatan efek samping
+    di save_mata_kuliah_df, berlaku sama di sini).
+
+    Penyesuaian: baris yang dihapus dari editor sekarang BENAR-BENAR dihapus
+    dari database - TAPI hanya kalau kode CPL itu tidak sedang dirujuk CPMK
+    di RPS manapun (dicek lewat _cpl_kode_terpakai_di_rps, karena tidak ada
+    foreign key database yang otomatis mencegah ini seperti pada Mata
+    Kuliah). Kode yang gagal dihapus karena masih dipakai dikembalikan lewat
+    `terpakai` supaya pemanggil bisa kasih tahu Admin.
+    """
+    kode_tersisa = {
+        _clean_str(row.get("Kode CPL")) for _, row in edited_df.iterrows()
+        if _clean_str(row.get("Kode CPL"))
+    }
+    kode_lama = {
+        _clean_str(row.get("Kode CPL")) for _, row in original_df.iterrows()
+        if _clean_str(row.get("Kode CPL"))
+    }
+    kode_dihapus = kode_lama - kode_tersisa
+
+    terpakai = _cpl_kode_terpakai_di_rps(client, prodi_id, tahun_kurikulum, kode_dihapus)
+    boleh_dihapus = kode_dihapus - terpakai
+    for kode in boleh_dihapus:
+        client.table("cpl").delete().eq("prodi_id", prodi_id).eq(
+            "tahun_kurikulum", tahun_kurikulum
+        ).eq("kode_cpl", kode).execute()
+
     saved = 0
     for _, row in edited_df.iterrows():
         kode_cpl = _clean_str(row.get("Kode CPL"))
@@ -197,7 +285,7 @@ def save_cpl_df(client, prodi_id, tahun_kurikulum, edited_df):
         }
         client.table("cpl").upsert(payload, on_conflict="prodi_id,kode_cpl,tahun_kurikulum").execute()
         saved += 1
-    return saved
+    return saved, sorted(terpakai)
 
 
 # --------------------------------------------------------------------------
@@ -343,13 +431,33 @@ def list_whitelist_menunggu(client):
     return [w for w in list_whitelist_all(client) if not w["sudah_daftar"]]
 
 
-def save_whitelist_df(client, edited_df, prodi_rows):
+def save_whitelist_df(client, edited_df, prodi_rows, original_df):
     """Upsert baris whitelist (NIP, Nama, Prodi Homebase) dari st.data_editor.
     Baris dengan NIP/Nama kosong dilewati. Prodi Homebase diketik sebagai NAMA
     (dicocokkan ke prodi_id lewat nama, tidak case-sensitive) supaya gampang
     ditempel dari Excel - nama Prodi yang tidak dikenali dilewati KHUSUS kolom
-    itu (NIP+Nama tetap tersimpan), dikembalikan di `tidak_dikenali`."""
+    itu (NIP+Nama tetap tersimpan), dikembalikan di `tidak_dikenali`.
+
+    Penyesuaian: baris yang dihapus dari editor sekarang BENAR-BENAR dihapus
+    dari database (sebelumnya dilewati diam-diam, baris muncul lagi setelah
+    reload). Aman tanpa pengecekan tambahan - tidak ada tabel lain yang
+    berelasi ke whitelist_pendaftaran lewat foreign key (baris ini cuma
+    dibaca SEKALI oleh trigger saat Dosen Daftar, bukan rujukan hidup
+    seterusnya) - menghapusnya tidak memengaruhi akun yang sudah aktif.
+    """
     nama_ke_id = {p["nama"].strip().lower(): p["id"] for p in prodi_rows}
+
+    nip_tersisa = {
+        _clean_str(row.get("NIP")) for _, row in edited_df.iterrows()
+        if _clean_str(row.get("NIP"))
+    }
+    nip_lama = {
+        _clean_str(row.get("NIP")) for _, row in original_df.iterrows()
+        if _clean_str(row.get("NIP"))
+    }
+    for nip_hapus in (nip_lama - nip_tersisa):
+        client.table("whitelist_pendaftaran").delete().eq("nip", nip_hapus).execute()
+
     tidak_dikenali = []
     saved = 0
     for _, row in edited_df.iterrows():

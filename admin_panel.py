@@ -6,12 +6,19 @@ CPL) langsung dari aplikasi - menggantikan edit file Excel manual.
 Fase 5: ditambah dashboard statistik RPS & tab kelola peran pengguna
 (assign Kaprodi ke Prodi yang diampu).
 
-Sengaja HANYA mendukung tambah & edit (bukan hapus baris) untuk data master:
-- Menghapus data master berarti Mata Kuliah/CPL yang sudah dipakai di RPS
-  bisa jadi rujukan mati - keputusan yang lebih baik ditunda sampai ada
-  pengecekan "dipakai di RPS mana saja" (menyusul kalau memang dibutuhkan).
-- Kalau perlu hapus/ubah Kode MK atau Kode CPL yang sudah ada sekarang,
-  lakukan lewat SQL Editor Supabase langsung.
+Penyesuaian: hapus baris data master (Mata Kuliah/CPL/Whitelist/Pengguna)
+lewat editor sekarang BENAR-BENAR menghapus dari database (lihat
+save_mata_kuliah_df, save_cpl_df, save_whitelist_df di db_master.py) -
+sebelumnya cuma dilewati diam-diam saat disimpan (baris "terhapus" itu
+muncul lagi setelah reload, membingungkan). Pengecekan "dipakai di RPS mana
+saja" yang tadinya ditunda kini sudah diterapkan: Mata Kuliah dilindungi
+langsung oleh database (foreign key), CPL dicek manual (rujukan CPMK->CPL
+cuma teks di JSONB, bukan foreign key sungguhan) - keduanya menolak
+penghapusan (bukan diam-diam gagal) kalau masih dipakai. Tab Pengguna tetap
+TIDAK punya opsi hapus baris sama sekali (num_rows="fixed") - itu memang
+disengaja, akun cuma boleh dihapus lewat Supabase Dashboard (lihat
+auth.py) supaya auth.users ikut terhapus, bukan cuma baris di tabel
+pengguna.
 """
 
 from collections import Counter
@@ -183,7 +190,10 @@ def render_admin_panel(client):
             "sini, dan Nama + Prodi Homebase otomatis terisi dari daftar ini. Bisa "
             "juga langsung dipakai buat menetapkan koordinator Mata Kuliah (tab "
             "Koordinator) sebelum orangnya sempat Daftar - begitu Daftar, "
-            "penugasannya otomatis tersambung.\n\n"
+            "penugasannya otomatis tersambung. Hapus baris lewat ikon tempat "
+            "sampah kalau memang salah input atau batal - baris yang dihapus di "
+            "sini BENAR-BENAR terhapus dari database, tidak memengaruhi akun "
+            "yang sudah aktif kalau orangnya sudah keburu Daftar.\n\n"
             "**Prodi Homebase** ditulis sebagai nama Prodi (mis. 'Informatika PJJ "
             "S1'), boleh dikosongkan kalau belum tahu.\n\n"
             "Tips: siapkan tiga kolom (NIP, Nama, Prodi Homebase) di Excel, salin, "
@@ -211,7 +221,7 @@ def render_admin_panel(client):
         )
         if st.button("💾 Simpan Daftar Pra-pendaftaran", key="save_whitelist_btn"):
             try:
-                n, tidak_dikenali = save_whitelist_df(client, edited_whitelist, prodi_rows)
+                n, tidak_dikenali = save_whitelist_df(client, edited_whitelist, prodi_rows, df_whitelist)
                 st.success(f"{n} baris disimpan.")
                 if tidak_dikenali:
                     daftar = ", ".join(f"NIP {nip} ('{nama}')" for nip, nama in tidak_dikenali)
