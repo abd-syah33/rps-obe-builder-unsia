@@ -105,7 +105,6 @@ update file-file baru:
 ```bash
 cd rps_streamlit
 git add .
-
 git commit -m "Update: DOCX export, asisten AI diperluas, auto-isi nama pejabat"
 git push origin main
 ```
@@ -545,3 +544,106 @@ Perubahan lanjutan dari model checklist sebelumnya - sekarang tiap CPMK diisi
 
 **Sudah diuji**: dokumen contoh sudah di-generate & diperiksa - kolom
 persentase per CPMK dan baris Bobot Nilai tampil benar sesuai bobot baru.
+
+## Template RPS v3: Role BPM, Level Penggunaan AI, Keterangan Waktu, "Interaksi"
+
+Empat perubahan sekaligus (template `.docx` diperbarui, semua sudah diuji
+dengan generate dokumen contoh & diperiksa visual):
+
+**1. Role BPM (Biro Penjaminan Mutu) - validasi tahap KEDUA setelah Kaprodi:**
+- Alur baru: `draft → diajukan → disetujui (Kaprodi, MENUNGGU BPM) → divalidasi (BPM, FINAL)`
+- Ditolak di tahap MANA PUN (Kaprodi atau BPM) → langsung balik ke Dosen
+  (status `ditolak`), ajukan ulang otomatis masuk antrian Kaprodi dari awal
+- BPM cakupannya **se-institusi** (semua Prodi), bukan per-Prodi seperti Kaprodi
+- Menu baru **"✅ Validasi BPM"** (`bpm_panel.py`) - sama pola dengan Panel Kaprodi
+- Menu **"RPS Disetujui"** berganti nama jadi **"RPS Tervalidasi"**, syaratnya
+  sekarang status `divalidasi` (lolos KEDUANYA), bukan cuma `disetujui` Kaprodi lagi
+- Panel Admin → tab Pengguna: `bpm` jadi pilihan Role
+- RPS yang SUDAH `disetujui` dari SEBELUM fitur ini ada otomatis masuk antrian
+  BPM (belum otomatis final) - tidak ada migrasi data terpisah yang diperlukan
+- QR ke-3 (Ka. Biro Penjaminan Mutu) muncul di dokumen, memakai field
+  "Nama Ka. Biro Penjaminan Mutu" di tab Info Umum (auto-isi dari
+  `config/pejabat.txt` baris `KABIRO_PENJAMINAN_MUTU` - field ini sebenarnya
+  sudah ada sejak lama, cuma diaktifkan lagi widget-nya)
+
+**2. Level Penggunaan AI** - field baru (opsional, tidak wajib diisi sebelum
+Ajukan) di tab Daftar Pustaka: pilihan Tanpa AI/Assisted AI/Free AI + deskripsi
+bebas, tercetak di baris baru tepat di atas Daftar Pustaka pada dokumen.
+
+**3. Keterangan Waktu** - otomatis ditambahkan ke kolom "Bentuk dan Metode
+Pembelajaran Daring" di tiap minggu, dihitung dari SKS mata kuliah:
+`[TM: 1x (SKS×50 menit)]`, `[BT: 1x (SKS×60 menit)]`, `[BM: 1x (SKS×60 menit)]`
+(Tatap Muka/Belajar Terstruktur/Belajar Mandiri - total selalu 170 menit/SKS/
+minggu, sesuai standar SKS, sama di semua 16 minggu karena SKS tetap untuk
+satu mata kuliah).
+
+**4. "Kehadiran dan Sikap" → "Interaksi"** - rename kategori penilaian.
+RPS lama yang masih pakai nama lama otomatis dipetakan ke nama baru saat
+dibuka (persentase yang sudah diisi TIDAK hilang - murni rename, beda dengan
+perubahan struktur checklist->persentase sebelumnya yang memang harus reset).
+
+**Kolom & fungsi database baru**: `catatan_bpm`, `diproses_oleh_bpm`,
+`diproses_pada_bpm` di tabel `rps`; fungsi `is_bpm()`, `validasi_bpm_rps()`,
+`tolak_bpm_rps()`; role `bpm` & status `divalidasi` ditambahkan ke CHECK
+constraint masing-masing.
+
+## Penyimpanan progres lebih sering (A: tombol per-tab, B: auto-save berkala)
+
+Mengurangi risiko kehilangan progres akibat refresh tidak sengaja saat
+mengisi RPS (proses yang bisa makan waktu lama):
+
+**A. Tombol "💾 Simpan Progres" di tiap tab** - sebelumnya cuma ada di
+sidebar (yang bisa tidak kelihatan saat scroll panjang, terutama di tab "16
+Pertemuan"). Sekarang ada juga di bagian atas tiap tab (Info Umum, CPL&CPMK,
+16 Pertemuan - atas DAN bawah, Daftar Pustaka, Komponen Penilaian), semuanya
+memanggil fungsi yang sama (`simpan_progres_button()`) supaya perilakunya
+konsisten dan tidak ada logika ganda.
+
+**B. Auto-save berkala (~60 detik)** - lewat `@st.fragment(run_every=60)`
+(fitur BAWAAN Streamlit, bukan library pihak ketiga) yang otomatis menyimpan
+progres di background selama halaman terbuka, TANPA perlu klik apa pun.
+Caption "🔄 Auto-save terakhir: HH:MM:SS" muncul di sidebar sebagai bukti
+jalan/tidaknya.
+
+- Auto-save TIDAK jalan kalau status RPS sedang tidak bisa diedit
+  (diajukan/disetujui/divalidasi) - sama seperti syarat tombol manual
+- Auto-save TIDAK menyimpan (dan tidak mencatat baris riwayat baru) kalau
+  isi RPS PERSIS SAMA dengan penyimpanan terakhir (dicek lewat hash SHA-256
+  dari seluruh data) - supaya tabel `rps_riwayat` tidak membengkak karena
+  auto-save berulang tanpa perubahan berarti
+- Auto-save yang gagal (mis. tidak ada koneksi internet sesaat) didiamkan
+  tanpa popup error - supaya tidak mengganggu Dosen yang sedang fokus mengetik
+- Butuh **Streamlit >= 1.37** (sudah dinaikkan di `requirements.txt`) untuk
+  dukungan `run_every` - kalau versi lebih lama, akan error saat dijalankan
+
+**CATATAN JUJUR**: `@st.fragment(run_every=...)` ini fitur bawaan Streamlit
+(bukan komponen pihak ketiga seperti cookie manager yang pernah dicoba dan
+dibatalkan sebelumnya karena race condition) - sudah diverifikasi API-nya
+tersedia & dekoratornya tidak error saat didefinisikan, TAPI perilaku
+timer-nya sendiri belum diuji di browser sungguhan. Uji nyata yang perlu
+dilakukan: buka RPS, ubah sesuatu, tunggu ±60 detik TANPA klik apa pun,
+lihat apakah caption "Auto-save terakhir" berubah sendiri.
+
+## Nama Koordinator/Kaprodi/BPM & Rumpun MK ditarik otomatis dari database
+
+Empat field di tab Info Umum sekarang **read-only** (tidak bisa diketik
+manual lagi) - semuanya ditarik langsung dari database saat Mata Kuliah
+dipilih:
+
+- **Dosen Pengembang RPS (Koordinator)** - otomatis nama akun yang sedang
+  login (dijamin memang koordinator MK ini, lewat RLS)
+- **Nama Ketua Prodi** & **Nama Ka. Biro Penjaminan Mutu** - ditarik lewat
+  RPC baru `get_pejabat_prodi()`/`get_pejabat_bpm()` (SECURITY DEFINER,
+  cakupan dipersempit HANYA nama+email) - dibutuhkan karena Dosen biasa
+  TIDAK punya akses baca ke baris `pengguna` milik orang lain lewat policy
+  RLS yang ada. Kalau belum ada akun Kaprodi/BPM terdaftar di database,
+  jatuh ke `config/pejabat.txt` dulu sebagai fallback masa transisi, muncul
+  peringatan kecil di UI kalau keduanya kosong.
+- **Rumpun MK** - ditarik dari data master Mata Kuliah (kolom yang sebelumnya
+  bernama **"Ranah Topik"**, sudah di-rename jadi **"Rumpun MK"** di database
+  supaya istilahnya konsisten dengan form/dokumen - lihat
+  `ALTER TABLE ... RENAME COLUMN` di `sql/schema.sql`, aman dijalankan ulang).
+
+Kolom Excel data master yang tadinya "Ranah Topik" boleh tetap dipakai
+(skrip migrasi menerima KEDUA nama header, lama maupun baru) atau diganti
+jadi "Rumpun MK" - dua-duanya berfungsi.

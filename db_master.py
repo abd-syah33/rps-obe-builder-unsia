@@ -17,7 +17,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-MK_DISPLAY_COLUMNS = ["Nama Mata Kuliah", "Kode MK", "SKS", "Semester", "Ranah Topik", "Dosen Pengembang"]
+MK_DISPLAY_COLUMNS = ["Nama Mata Kuliah", "Kode MK", "SKS", "Semester", "Rumpun MK", "Dosen Pengembang"]
 CPL_DISPLAY_COLUMNS = ["Kode CPL", "Deskripsi CPL"]
 
 # Tahun kurikulum yang SELALU ditawarkan di dropdown, walau belum ada Mata
@@ -84,7 +84,7 @@ def load_master_db(_client, prodi_id, tahun_kurikulum):
     mk_resp = (
         _client.table("mata_kuliah")
         .select(
-            "id, nama_mk, kode_mk, sks, semester, ranah_topik, dosen_pengembang, "
+            "id, nama_mk, kode_mk, sks, semester, rumpun_mk, dosen_pengembang, "
             "koordinator_user_id, koordinator_nip"
         )
         .eq("prodi_id", prodi_id)
@@ -103,7 +103,7 @@ def load_master_db(_client, prodi_id, tahun_kurikulum):
                 "Kode MK": r["kode_mk"],
                 "SKS": r.get("sks"),
                 "Semester": r.get("semester"),
-                "Ranah Topik": r.get("ranah_topik") or "-",
+                "Rumpun MK": r.get("rumpun_mk") or "-",
                 "Dosen Pengembang": r.get("dosen_pengembang") or "",
             }
             for r in mk_rows
@@ -174,7 +174,7 @@ def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df):
             "kode_mk": kode_mk,
             "sks": _clean_int(row.get("SKS")),
             "semester": _clean_int(row.get("Semester")),
-            "ranah_topik": _clean_str(row.get("Ranah Topik")),
+            "rumpun_mk": _clean_str(row.get("Rumpun MK")),
             "dosen_pengembang": _clean_str(row.get("Dosen Pengembang")),
         }
         client.table("mata_kuliah").upsert(payload, on_conflict="kode_mk,tahun_kurikulum").execute()
@@ -200,6 +200,41 @@ def save_cpl_df(client, prodi_id, tahun_kurikulum, edited_df):
         client.table("cpl").upsert(payload, on_conflict="prodi_id,kode_cpl,tahun_kurikulum").execute()
         saved += 1
     return saved
+
+
+# --------------------------------------------------------------------------
+# Penyesuaian: Dosen BIASA (bukan admin/kaprodi) perlu tahu nama Kaprodi
+# Prodi-nya & nama BPM untuk auto-isi RPS - tapi policy RLS pengguna saat ini
+# cuma izinkan baca profil SENDIRI (+ admin/kaprodi baca semua). Dosen biasa
+# TIDAK match salah satu dari itu untuk baris milik ORANG LAIN, jadi query
+# select biasa ke tabel pengguna akan pulang kosong. Lewat RPC khusus
+# (SECURITY DEFINER, cakupan dipersempit HANYA nama+email) di sql/schema.sql.
+# --------------------------------------------------------------------------
+def get_kaprodi_nama(client, prodi_id):
+    """Nama Kaprodi terdaftar untuk satu Prodi. None kalau belum ada yang
+    ditetapkan sebagai Kaprodi Prodi ini (atau prodi_id kosong)."""
+    if not prodi_id:
+        return None
+    try:
+        resp = client.rpc("get_pejabat_prodi", {"target_prodi_id": prodi_id}).execute()
+        rows = resp.data or []
+        if rows:
+            return rows[0].get("kaprodi_nama") or rows[0].get("kaprodi_email")
+    except Exception:
+        pass
+    return None
+
+
+def get_bpm_nama(client):
+    """Nama BPM terdaftar (se-institusi). None kalau belum ada akun ber-role bpm."""
+    try:
+        resp = client.rpc("get_pejabat_bpm").execute()
+        rows = resp.data or []
+        if rows:
+            return rows[0].get("bpm_nama") or rows[0].get("bpm_email")
+    except Exception:
+        pass
+    return None
 
 
 # --------------------------------------------------------------------------

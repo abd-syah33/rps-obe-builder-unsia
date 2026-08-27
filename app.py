@@ -8,7 +8,7 @@ Cara menjalankan:
 
 Struktur data master:
     data/<Nama Prodi>.xlsx   -> setiap file mewakili 1 Program Studi
-        sheet 'Mata Kuliah'  -> kolom: No, Nama Mata Kuliah, Kode MK, SKS, Semester, Ranah Topik, Dosen Pengembang
+        sheet 'Mata Kuliah'  -> kolom: No, Nama Mata Kuliah, Kode MK, SKS, Semester, Rumpun MK, Dosen Pengembang
         sheet 'CPL'          -> kolom: Kode CPL, Deskripsi CPL
 
 Catatan teknis (widget perlu 2x klik):
@@ -40,7 +40,10 @@ except ImportError:
 from pdf_export import with_code
 from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOBOT_KATEGORI
 from auth import require_login, get_client
-from db_master import list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum
+from db_master import (
+    list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum,
+    get_kaprodi_nama, get_bpm_nama,
+)
 from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
 from bpm_panel import render_bpm_panel
@@ -758,19 +761,33 @@ with st.sidebar:
 
     if mk_sel_name != st.session_state.mk_sel:
         new_mk_row = mk_df[mk_df["Nama Mata Kuliah"] == mk_sel_name].iloc[0]
-        raw_dp = new_mk_row.get("Dosen Pengembang", "")
-        dosen_pengembang = "" if pd.isna(raw_dp) else str(raw_dp).strip()
+        raw_rumpun = new_mk_row.get("Rumpun MK", "")
+        rumpun_mk_val = "" if pd.isna(raw_rumpun) or raw_rumpun == "-" else str(raw_rumpun).strip()
 
         reset_rps_state()
         st.session_state.prodi_sel = prodi_sel
         st.session_state.mk_sel = mk_sel_name
 
-        # Auto-isi (tetap bisa diedit manual nanti di tab Info Umum / Pratinjau)
-        st.session_state.info_umum["dosen_koordinator"] = dosen_pengembang
-        st.session_state.info_umum["nama_koordinator"] = dosen_pengembang
+        # Penyesuaian: Dosen Pengembang RPS (Koordinator), Nama Kaprodi, dan
+        # Nama Ka. BPM TIDAK LAGI diketik manual atau diambil dari file
+        # config/pejabat.txt - sekarang ditarik LANGSUNG dari database:
+        # koordinator = akun yang sedang login (cuma koordinator MK ini yang
+        # bisa sampai ke titik ini, dijamin RLS), Kaprodi & BPM lewat RPC
+        # get_kaprodi_nama()/get_bpm_nama() (lihat db_master.py). Kalau belum
+        # ada yang ditetapkan sebagai Kaprodi/BPM di database, jatuh ke
+        # config/pejabat.txt dulu sebagai fallback masa transisi, baru kosong
+        # kalau itu juga tidak ada.
+        nama_saya = pengguna.get("nama") or pengguna.get("email") or ""
+        st.session_state.info_umum["dosen_koordinator"] = nama_saya
+        st.session_state.info_umum["nama_koordinator"] = nama_saya
+
         pejabat_cfg = load_pejabat_config()
-        st.session_state.info_umum["nama_kaprodi"] = pejabat_cfg["kaprodi"].get(prodi_sel, "")
-        st.session_state.info_umum["nama_biro_pjm"] = pejabat_cfg["kabiro"]
+        nama_kaprodi_db = get_kaprodi_nama(client, prodi_id)
+        st.session_state.info_umum["nama_kaprodi"] = nama_kaprodi_db or pejabat_cfg["kaprodi"].get(prodi_sel, "")
+        nama_bpm_db = get_bpm_nama(client)
+        st.session_state.info_umum["nama_biro_pjm"] = nama_bpm_db or pejabat_cfg["kabiro"]
+
+        st.session_state.info_umum["rumpun_mk"] = rumpun_mk_val
 
         # Fase 4: kalau RPS untuk Mata Kuliah ini sudah pernah disimpan
         # sebelumnya (oleh Dosen yang sama), muat isinya - menang dibanding
@@ -958,9 +975,10 @@ with tab_info:
     st.divider()
     st.subheader("Informasi Umum RPS")
     info = st.session_state.info_umum
-    info["dosen_koordinator"] = st.text_input(
-        "Dosen Pengembang RPS (Koordinator)", info["dosen_koordinator"], key=mk_key("dosen_koordinator"),
-        help="Terisi otomatis dari kolom 'Dosen Pengembang' di data master Mata Kuliah, boleh diedit.",
+    st.text_input(
+        "Dosen Pengembang RPS (Koordinator)", info["dosen_koordinator"], disabled=True,
+        key=mk_key("dosen_koordinator_display"),
+        help="Otomatis diisi nama akun Anda sendiri (koordinator Mata Kuliah ini), tidak bisa diedit manual.",
     )
     st.caption(
         "ℹ️ Field **Dosen Pengampu** di dokumen sekarang otomatis diisi nama akun yang "
@@ -972,23 +990,28 @@ with tab_info:
 
     st.divider()
     st.subheader("Rumpun Mata Kuliah")
-    info["rumpun_mk"] = st.text_input(
-        "Rumpun MK (RMK)", info["rumpun_mk"], key=mk_key("rumpun_mk"),
+    st.text_input(
+        "Rumpun MK (RMK)", info["rumpun_mk"], disabled=True, key=mk_key("rumpun_mk_display"),
+        help="Otomatis diisi dari data master Mata Kuliah (kolom Rumpun MK) - hubungi Admin/Kaprodi kalau perlu diperbaiki.",
     )
 
     st.divider()
     st.subheader("Ketua Prodi")
-    info["nama_kaprodi"] = st.text_input(
-        "Nama Ketua Prodi", info["nama_kaprodi"], key=mk_key("nama_kaprodi"),
-        help="Terisi otomatis dari config/pejabat.txt, boleh diedit. Muncul di QR Kaprodi pada dokumen.",
+    st.text_input(
+        "Nama Ketua Prodi", info["nama_kaprodi"], disabled=True, key=mk_key("nama_kaprodi_display"),
+        help="Otomatis diisi dari akun yang terdaftar sebagai Kaprodi Prodi ini. Muncul di QR Kaprodi pada dokumen.",
     )
+    if not info["nama_kaprodi"]:
+        st.caption("⚠️ Belum ada akun Kaprodi terdaftar untuk Prodi ini - hubungi Admin.")
 
     st.divider()
     st.subheader("Ka. Biro Penjaminan Mutu (BPM)")
-    info["nama_biro_pjm"] = st.text_input(
-        "Nama Ka. Biro Penjaminan Mutu", info["nama_biro_pjm"], key=mk_key("nama_biro_pjm"),
-        help="Terisi otomatis dari config/pejabat.txt (KABIRO_PENJAMINAN_MUTU), boleh diedit. Muncul di QR BPM pada dokumen.",
+    st.text_input(
+        "Nama Ka. Biro Penjaminan Mutu", info["nama_biro_pjm"], disabled=True, key=mk_key("nama_biro_pjm_display"),
+        help="Otomatis diisi dari akun yang terdaftar sebagai BPM. Muncul di QR BPM pada dokumen.",
     )
+    if not info["nama_biro_pjm"]:
+        st.caption("⚠️ Belum ada akun BPM terdaftar - hubungi Admin.")
 
 # --- Tab: CPL & CPMK ---
 with tab_cpl:

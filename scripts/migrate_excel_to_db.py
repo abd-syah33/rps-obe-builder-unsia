@@ -106,7 +106,10 @@ def main():
                     "kode_mk": clean_kode(row["Kode MK"]),
                     "sks": clean_int(row.get("SKS")),
                     "semester": clean_int(row.get("Semester")),
-                    "ranah_topik": clean_str(row.get("Ranah Topik")),
+                    # Terima dua kemungkinan nama header Excel - file lama pakai
+                    # "Ranah Topik", file baru (kalau sudah disesuaikan) pakai
+                    # "Rumpun MK" - kolom database-nya sekarang bernama rumpun_mk.
+                    "rumpun_mk": clean_str(row.get("Rumpun MK") if "Rumpun MK" in row else row.get("Ranah Topik")),
                     "dosen_pengembang": clean_str(row.get("Dosen Pengembang")),
                 },
                 on_conflict="kode_mk,tahun_kurikulum",
