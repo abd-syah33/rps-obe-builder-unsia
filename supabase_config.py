@@ -50,9 +50,13 @@ def load_supabase_config():
 
     Mengembalikan string kosong untuk field yang benar-benar tidak ditemukan
     di manapun, supaya pemanggil bisa mengecek `if not cfg["url"]` tanpa
-    perlu try/except KeyError.
+    perlu try/except KeyError. Pengecualian: "app_base_url" punya nilai
+    bawaan (URL Streamlit Cloud yang sedang dipakai) supaya tetap berfungsi
+    tanpa konfigurasi tambahan - override lewat APP_BASE_URL kalau nanti
+    pindah alamat.
     """
-    result = {"url": "", "anon_key": "", "service_role_key": ""}
+    result = {"url": "", "anon_key": "", "service_role_key": "",
+              "app_base_url": "https://rps-obe-builder-unsia-2pkfdcynwhf3tyrs5rbqic.streamlit.app"}
 
     if os.path.exists(SUPABASE_CONFIG_PATH):
         try:
@@ -69,6 +73,8 @@ def load_supabase_config():
                         result["anon_key"] = value
                     elif key == "SUPABASE_SERVICE_ROLE_KEY":
                         result["service_role_key"] = value
+                    elif key == "APP_BASE_URL":
+                        result["app_base_url"] = value.rstrip("/")
         except Exception:
             pass
 
@@ -80,6 +86,8 @@ def load_supabase_config():
                 result["anon_key"] = st.secrets["SUPABASE_ANON_KEY"]
             if not result["service_role_key"] and st.secrets.get("SUPABASE_SERVICE_ROLE_KEY"):
                 result["service_role_key"] = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+            if st.secrets.get("APP_BASE_URL"):
+                result["app_base_url"] = st.secrets["APP_BASE_URL"].rstrip("/")
         except Exception:
             # Tidak ada secrets.toml sama sekali (mis. development lokal murni
             # tanpa pernah setup Secrets) - itu wajar, bukan error yang perlu

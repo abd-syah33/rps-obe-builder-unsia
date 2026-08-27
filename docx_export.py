@@ -32,6 +32,17 @@ TEMPLATE_PATH = os.path.join(ASSETS_DIR, "rps_template.docx")
 # dan rps_browse.py (halaman "RPS Disetujui") tanpa duplikasi/import silang.
 BOBOT_KATEGORI = {"Interaksi": 30, "UTS": 20, "Tugas": 20, "UAS": 30}
 
+# Penyesuaian: MKU (Mata Kuliah Umum) bukan Program Studi sungguhan - RPS-nya
+# divalidasi oleh Ka. BAA (Biro Administrasi Akademik) yang ditugaskan untuk
+# itu, bukan oleh Kaprodi. Judul dokumen (tanpa kata "PROGRAM STUDI" di
+# depannya) dan label QR persetujuan ("Ka. BAA", bukan "Ketua Program Studi")
+# dibedakan khusus untuk Prodi dengan nama ini.
+MKU_PRODI_NAME = "Mata Kuliah Umum"
+
+
+def _is_prodi_mku(prodi):
+    return (prodi or "").strip().casefold() == MKU_PRODI_NAME.casefold()
+
 # Urutan minggu -> indeks baris tabel pertemuan pada template BARU. Berbeda dari
 # template lama: minggu ke-8 (UTS) sekarang PUNYA barisnya sendiri (tidak dilompati),
 # dan minggu ke-16 (UAS) juga baris biasa (bukan lagi 1 baris gabungan bertuliskan
@@ -152,20 +163,29 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
     # --- judul (baris 0) & tanggal penyusunan (baris 1) ---
     title_cell = dedup_row_cells(t.rows[0])[-1]
     original_title = title_cell.text
-    if "….." in original_title:
-        full_title = original_title.replace("…..", prodi)
+    prodi_upper = (prodi or "").upper()
+    is_mku = _is_prodi_mku(prodi)
+    # Untuk MKU: baris judul cukup nama Prodi-nya saja, TANPA "PROGRAM STUDI"
+    # di depannya (karena MKU bukan Program Studi sungguhan).
+    baris_prodi = prodi_upper if is_mku else f"PROGRAM STUDI {prodi_upper}"
+    if "PROGRAM STUDI ….." in original_title:
+        full_title = original_title.replace("PROGRAM STUDI …..", baris_prodi)
+    elif "PROGRAM STUDI ....." in original_title:
+        full_title = original_title.replace("PROGRAM STUDI .....", baris_prodi)
+    elif "….." in original_title:
+        full_title = original_title.replace("…..", prodi_upper)
     elif "....." in original_title:
-        full_title = original_title.replace(".....", prodi)
+        full_title = original_title.replace(".....", prodi_upper)
     else:
         parts = original_title.split("\n")
         if len(parts) >= 2:
-            parts[1] = f"PROGRAM STUDI {prodi}"
+            parts[1] = baris_prodi
         full_title = "\n".join(parts)
     set_cell_text(title_cell, full_title)
 
     tgl_cell = dedup_row_cells(t.rows[1])[0]
-    tgl = info_umum.get("tanggal_dokumen", "") or "-"
-    set_cell_text(tgl_cell, f"Tanggal Penyusunan : {tgl}")
+    tgl_disusun = info_umum.get("tanggal_dokumen", "") or "-"
+    set_cell_text(tgl_cell, f"Tanggal Penyusunan : {tgl_disusun}")
 
     # --- identitas (baris 2-8); pemetaan sel sudah diverifikasi lewat XML template
     #     baru. Baris "MK yang menjadi prasyarat"/"Menjadi Prasyarat untuk MK" dari
@@ -203,20 +223,30 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
     #     koordinator 4->3, kaprodi 6->5 (diverifikasi ulang lewat XML mentah,
     #     bukan tebakan). Selnya di-vertical-merge menutupi baris 3-7 (Kode s/d
     #     Dosen Pengampu), tapi konten sungguhan cuma ada di baris asal (baris
-    #     3) - baris 4-7 cuma penanda lanjutan merge, TIDAK PERLU ditulis lagi. ---
+    #     3) - baris 4-7 cuma penanda lanjutan merge, TIDAK PERLU ditulis lagi.
+    #
+    #     Penyesuaian: masing-masing QR sekarang pakai TANGGAL KEJADIANNYA
+    #     SENDIRI (bukan disamaratakan dengan tanggal pengajuan) - "disusun"
+    #     = tanggal_dokumen (tanggal RPS diajukan), "disetujui" = tanggal_disetujui
+    #     (tanggal Kaprodi menyetujui), "divalidasi" = tanggal_divalidasi
+    #     (tanggal BPM memvalidasi). Pemanggil yang menyediakan ketiganya lewat
+    #     info_umum - kalau salah satu belum ada (mis. RPS belum sampai tahap
+    #     itu), pemanggil boleh isi "-" atau string kosong. ---
+    tgl_disetujui = info_umum.get("tanggal_disetujui", "") or "-"
+    tgl_divalidasi = info_umum.get("tanggal_divalidasi", "") or "-"
     kode_mk = str(mk_row.get("Kode MK", "-"))
     nama_mk = mk_row.get("Nama Mata Kuliah", "-")
     fill_qr_cell(
         r3[3], "disusun", kode_mk, nama_mk,
-        info_umum.get("dosen_koordinator"), "Koordinator Mata Kuliah", tgl,
+        info_umum.get("dosen_koordinator"), "Koordinator Mata Kuliah", tgl_disusun,
     )
     fill_qr_cell(
         r3[5], "disetujui", kode_mk, nama_mk,
-        info_umum.get("nama_kaprodi"), "Ketua Program Studi", tgl,
+        info_umum.get("nama_kaprodi"), "Ka. BAA" if is_mku else "Ketua Program Studi", tgl_disetujui,
     )
     fill_qr_cell(
         r3[7], "divalidasi", kode_mk, nama_mk,
-        info_umum.get("nama_biro_pjm"), "Ka. Biro Penjaminan Mutu", tgl,
+        info_umum.get("nama_biro_pjm"), "Ka. Biro Penjaminan Mutu", tgl_divalidasi,
     )
 
     # --- CPL (baris 11-15) ---

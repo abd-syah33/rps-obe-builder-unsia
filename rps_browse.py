@@ -10,11 +10,14 @@ Dokumen Word/PDF dibangun ULANG dari kolom `data` yang tersimpan (bukan dari
 session_state - RPS ini bukan milik/sedang diedit oleh yang membuka halaman
 ini), lewat pipeline export yang SAMA dengan tab Pratinjau & Ekspor di app.py.
 
-Penyesuaian (template RPS baru): "Dosen Pengampu" & "Tanggal Penyusunan" di
-dokumen yang diunduh dari sini SENGAJA dihitung ulang di sini juga (bukan
-dipakai apa adanya dari data tersimpan) - persis prinsip yang sama dengan tab
-Pratinjau & Ekspor: Dosen Pengampu = akun yang SEDANG mengunduh, Tanggal
-Penyusunan = tanggal RPS ini diajukan (diajukan_pada), bukan tanggal proses."""
+Penyesuaian (template RPS baru): "Dosen Pengampu" & tanggal-tanggal di dokumen
+yang diunduh dari sini SENGAJA dihitung ulang di sini juga (bukan dipakai apa
+adanya dari data tersimpan) - Dosen Pengampu = akun yang SEDANG mengunduh.
+Tanggal-tanggal SEKARANG DIBEDAKAN per tahap, bukan disamaratakan: QR
+Koordinator ("disusun") & "Tanggal Penyusunan" = tanggal RPS diajukan
+(diajukan_pada), QR Kaprodi ("disetujui") = tanggal Kaprodi menyetujui
+(diproses_pada), QR BPM ("divalidasi") = tanggal BPM memvalidasi
+(diproses_pada_bpm)."""
 
 from datetime import datetime
 
@@ -42,9 +45,11 @@ def _format_tanggal_indonesia(iso_str):
     return f"{dt.day} {bulan[dt.month - 1]} {dt.year}"
 
 
-def _data_to_export_args(data, tanggal_tampil, dosen_pengampu_tampil):
+def _data_to_export_args(data, tanggal_disusun, tanggal_disetujui, tanggal_divalidasi, dosen_pengampu_tampil):
     info_umum = dict(data.get("info_umum") or {})
-    info_umum["tanggal_dokumen"] = tanggal_tampil
+    info_umum["tanggal_dokumen"] = tanggal_disusun
+    info_umum["tanggal_disetujui"] = tanggal_disetujui
+    info_umum["tanggal_divalidasi"] = tanggal_divalidasi
     info_umum["dosen_pengampu"] = dosen_pengampu_tampil
     return {
         "info_umum": info_umum,
@@ -70,12 +75,43 @@ def render_rps_tervalidasi(client, pengguna):
     prodi_list = sorted({
         ((r.get("mata_kuliah") or {}).get("prodi") or {}).get("nama", "-") for r in rows
     })
-    prodi_filter = st.selectbox("Filter Program Studi", ["Semua"] + prodi_list, key="filter_prodi_tervalidasi")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        cari = st.text_input(
+            "🔍 Cari Nama/Kode Mata Kuliah", key="cari_tervalidasi",
+        ).strip().lower()
+    with c2:
+        prodi_filter = st.selectbox("Filter Program Studi", ["Semua"] + prodi_list, key="filter_prodi_tervalidasi")
+    with c3:
+        urutan = st.selectbox(
+            "Urutkan", ["Baru tervalidasi", "Lama tervalidasi", "Nama MK (A-Z)"],
+            key="urutan_tervalidasi",
+        )
+
+    if cari:
+        rows = [
+            r for r in rows
+            if cari in ((r.get("mata_kuliah") or {}).get("nama_mk") or "").lower()
+            or cari in str((r.get("mata_kuliah") or {}).get("kode_mk") or "").lower()
+        ]
     if prodi_filter != "Semua":
         rows = [
             r for r in rows
             if ((r.get("mata_kuliah") or {}).get("prodi") or {}).get("nama") == prodi_filter
         ]
+
+    if urutan == "Baru tervalidasi":
+        rows = sorted(rows, key=lambda r: r.get("diproses_pada_bpm") or r.get("updated_at") or "", reverse=True)
+    elif urutan == "Lama tervalidasi":
+        rows = sorted(rows, key=lambda r: r.get("diproses_pada_bpm") or r.get("updated_at") or "")
+    else:
+        rows = sorted(rows, key=lambda r: (r.get("mata_kuliah") or {}).get("nama_mk") or "")
+
+    if not rows:
+        st.info("Tidak ada RPS yang cocok dengan pencarian/filter di atas.")
+        return
+
+    st.caption(f"Menampilkan {len(rows)} RPS tervalidasi.")
 
     for row in rows:
         mk = row.get("mata_kuliah") or {}
@@ -100,9 +136,14 @@ def render_rps_tervalidasi(client, pengguna):
                     "Semester": mk.get("semester"),
                 }
                 _, cpl_df = load_master_db(client, mk.get("prodi_id"), tahun_kurikulum)
-                tanggal_tampil = _format_tanggal_indonesia(row.get("diajukan_pada")) or "(belum diajukan)"
+                tanggal_disusun = _format_tanggal_indonesia(row.get("diajukan_pada")) or "(belum diajukan)"
+                tanggal_disetujui = _format_tanggal_indonesia(row.get("diproses_pada")) or "-"
+                tanggal_divalidasi = _format_tanggal_indonesia(row.get("diproses_pada_bpm")) or "-"
                 dosen_pengampu_tampil = pengguna.get("nama") or pengguna.get("email")
-                export_args = _data_to_export_args(row.get("data") or {}, tanggal_tampil, dosen_pengampu_tampil)
+                export_args = _data_to_export_args(
+                    row.get("data") or {}, tanggal_disusun, tanggal_disetujui,
+                    tanggal_divalidasi, dosen_pengampu_tampil,
+                )
 
                 docx_buf = build_docx(
                     prodi=prodi.get("nama", "-"), mk_row=mk_row, cpl_df=cpl_df,

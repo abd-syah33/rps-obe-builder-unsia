@@ -26,11 +26,59 @@ def render_bpm_panel(client, pengguna):
         st.info("Tidak ada RPS yang sedang menunggu validasi BPM saat ini.")
         return
 
+    # Siapkan field tampilan sekali di awal, dipakai bareng untuk cari/filter/sortir
+    # dan render kartu di bawah - supaya tidak dihitung ulang dua kali per baris.
+    entri = []
     for row in rows:
         mk = row.get("mata_kuliah") or {}
         prodi = mk.get("prodi") or {}
         info_umum = (row.get("data") or {}).get("info_umum") or {}
         nama_dosen = info_umum.get("dosen_koordinator") or info_umum.get("nama_koordinator") or "-"
+        entri.append({
+            "row": row, "mk": mk, "prodi": prodi, "nama_dosen": nama_dosen,
+            "nama_mk": mk.get("nama_mk", "-"), "kode_mk": mk.get("kode_mk", "-"),
+            "nama_prodi": prodi.get("nama", "-"),
+            "diproses_pada": row.get("diproses_pada") or "",
+        })
+
+    prodi_list = sorted({e["nama_prodi"] for e in entri})
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        cari = st.text_input(
+            "🔍 Cari (Nama/Kode MK atau nama Koordinator)", key="bpm_cari",
+        ).strip().lower()
+    with c2:
+        prodi_filter = st.selectbox("Filter Prodi", ["Semua"] + prodi_list, key="bpm_filter_prodi")
+    with c3:
+        urutan = st.selectbox(
+            "Urutkan", ["Terlama menunggu", "Terbaru menunggu", "Nama MK (A-Z)"],
+            key="bpm_urutan",
+        )
+
+    if cari:
+        entri = [
+            e for e in entri
+            if cari in e["nama_mk"].lower() or cari in e["kode_mk"].lower()
+            or cari in e["nama_dosen"].lower()
+        ]
+    if prodi_filter != "Semua":
+        entri = [e for e in entri if e["nama_prodi"] == prodi_filter]
+
+    if urutan == "Terlama menunggu":
+        entri.sort(key=lambda e: e["diproses_pada"])
+    elif urutan == "Terbaru menunggu":
+        entri.sort(key=lambda e: e["diproses_pada"], reverse=True)
+    else:
+        entri.sort(key=lambda e: e["nama_mk"])
+
+    if not entri:
+        st.info("Tidak ada RPS yang cocok dengan pencarian/filter di atas.")
+        return
+
+    st.caption(f"Menampilkan {len(entri)} dari {len(rows)} RPS dalam antrian.")
+
+    for e in entri:
+        row, mk, prodi, nama_dosen = e["row"], e["mk"], e["prodi"], e["nama_dosen"]
 
         with st.container(border=True):
             st.markdown(

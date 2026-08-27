@@ -38,7 +38,7 @@ except ImportError:
     GENAI_AVAILABLE = False
 
 from pdf_export import with_code
-from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOBOT_KATEGORI
+from docx_export import BOBOT_KATEGORI
 from auth import require_login, get_client
 from db_master import (
     list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum,
@@ -166,24 +166,6 @@ def info_tooltip(info_dict):
     return "  \n".join(f"**{k}**: {v}" for k, v in info_dict.items())
 
 
-def format_tanggal_indonesia(iso_str):
-    """Ubah timestamp ISO (dari kolom rps.diajukan_pada di Supabase, mis.
-    '2026-08-23T10:15:00+00:00') jadi format tanggal Indonesia sederhana (mis.
-    '23 Agustus 2026'). Kembalikan None kalau kosong/tidak valid - pemanggil yang
-    memutuskan teks fallback-nya (mis. "(belum diajukan)")."""
-    if not iso_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    bulan = [
-        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember",
-    ]
-    return f"{dt.day} {bulan[dt.month - 1]} {dt.year}"
-
-
 N_CPL_WAJIB = 5
 N_MINGGU = 16
 KATEGORI_PENILAIAN = ["Interaksi", "UTS", "Tugas", "UAS"]
@@ -277,9 +259,9 @@ def init_state():
         "mk_sel": None,
         "cpl_selected": [],
         "info_umum": {
-            # dosen_pengampu SENGAJA tidak lagi diisi manual di sini - dokumen yang
-            # diekspor selalu memakai nama akun yang sedang mengunduh (lihat tab
-            # Pratinjau & Ekspor), bukan nilai tersimpan. Kuncinya tetap ada di
+            # dosen_pengampu SENGAJA tidak lagi diisi manual di sini - dokumen final
+            # yang diunduh (dari halaman RPS Tervalidasi) selalu memakai nama akun
+            # yang sedang mengunduh, bukan nilai tersimpan. Kuncinya tetap ada di
             # dict ini untuk kompatibilitas mundur data lama, tapi tidak ada widget
             # untuk mengeditnya lagi.
             "dosen_koordinator": "", "dosen_pengampu": "", "deskripsi_mk": "",
@@ -845,25 +827,7 @@ with st.sidebar:
         simpan_progres_button("sidebar", primary=True, label="💾 Simpan ke Database")
 
         if st.session_state.get("_rps_id"):
-            if st.button("📤 Ajukan ke Kaprodi", key="ajukan_btn", use_container_width=True):
-                issues = get_komponen_issues()
-                if issues:
-                    st.error(
-                        "Belum bisa diajukan - persentase Komponen Penilaian belum pas "
-                        "(cek tab 'Komponen Penilaian'):\n"
-                        + "\n".join(f"- {msg}" for msg in issues)
-                    )
-                else:
-                    try:
-                        ajukan_rps(client, st.session_state["_rps_id"])
-                        st.session_state["_rps_status"] = "diajukan"
-                        st.session_state["_rps_catatan"] = None
-                        st.session_state["_rps_catatan_bpm"] = None
-                        st.session_state["_rps_diajukan_pada"] = datetime.now().isoformat()
-                        st.success("RPS diajukan ke Kaprodi untuk direview.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Gagal mengajukan: {e}")
+            st.caption("➡️ Untuk mengajukan RPS ini ke Kaprodi, buka tab **Preview dan Ajukan**.")
     else:
         st.info(
             f"RPS berstatus **{status_label.get(status_saat_ini, status_saat_ini)}** - "
@@ -966,7 +930,7 @@ def mk_key(suffix):
 
 
 tab_info, tab_cpl, tab_pertemuan, tab_ref, tab_nilai, tab_export = st.tabs(
-    ["Info Umum", "CPL & CPMK", "16 Pertemuan", "Daftar Pustaka", "Komponen Penilaian", "Pratinjau & Ekspor"]
+    ["Info Umum", "CPL & CPMK", "16 Pertemuan", "Daftar Pustaka", "Komponen Penilaian", "Preview dan Ajukan"]
 )
 
 # --- Tab: Info Umum ---
@@ -981,8 +945,8 @@ with tab_info:
         help="Otomatis diisi nama akun Anda sendiri (koordinator Mata Kuliah ini), tidak bisa diedit manual.",
     )
     st.caption(
-        "ℹ️ Field **Dosen Pengampu** di dokumen sekarang otomatis diisi nama akun yang "
-        "sedang mengunduh dokumen (lihat tab Pratinjau & Ekspor), tidak lagi diisi manual di sini."
+        "ℹ️ Field **Dosen Pengampu** di dokumen final otomatis diisi nama akun yang "
+        "mengunduhnya dari halaman RPS Tervalidasi, tidak lagi diisi manual di sini."
     )
     info["deskripsi_mk"] = st.text_area(
         "Deskripsi Mata Kuliah", info["deskripsi_mk"], key=mk_key("deskripsi_mk"),
@@ -1294,12 +1258,12 @@ with tab_nilai:
     for idx, (k, v) in enumerate(BOBOT_KATEGORI.items()):
         cols[idx].metric(k, f"{v}%")
 
-# --- Tab: Pratinjau & Ekspor ---
+# --- Tab: Preview dan Ajukan ---
 with tab_export:
-    st.subheader("Pratinjau")
+    st.subheader("Preview")
     ready = len(st.session_state.cpl_selected) == N_CPL_WAJIB
     if not ready:
-        st.info("Lengkapi pemilihan 5 CPL di tab 'CPL & CPMK' terlebih dahulu untuk mengaktifkan ekspor.")
+        st.info("Lengkapi pemilihan 5 CPL di tab 'CPL & CPMK' terlebih dahulu untuk mengaktifkan pengajuan.")
     else:
         st.markdown(f"### {mk_row['Nama Mata Kuliah']} ({mk_row['Kode MK']})")
         st.write(f"**Prodi:** {st.session_state.prodi_sel} · **SKS:** {mk_row['SKS']} · **Semester:** {mk_row['Semester']}")
@@ -1310,55 +1274,62 @@ with tab_export:
             for i in range(1, 6)
         ]), use_container_width=True, hide_index=True)
 
-        st.divider()
-        tgl_pengajuan = format_tanggal_indonesia(st.session_state.get("_rps_diajukan_pada"))
-        tgl_tampil = tgl_pengajuan or "(belum diajukan)"
-        nama_pengunduh = pengguna.get("nama") or pengguna.get("email")
         st.caption(
-            f"📅 **Tanggal Penyusunan** (di dokumen): {tgl_tampil} — otomatis mengikuti "
-            "tanggal RPS ini diajukan ke Kaprodi, tidak bisa diedit manual.\n\n"
-            f"👤 **Dosen Pengampu** (di dokumen): {nama_pengunduh} — otomatis mengikuti akun "
-            "yang sedang mengunduh dokumen ini."
+            "ℹ️ Dokumen Word/PDF resminya baru bisa diunduh setelah RPS ini divalidasi "
+            "BPM, dari halaman **RPS Tervalidasi**. Preview di atas hanya untuk "
+            "memeriksa data sebelum diajukan."
         )
 
-        # Salinan info_umum KHUSUS untuk diekspor - tanggal & dosen pengampu dihitung
-        # ulang di sini (bukan disimpan permanen di data RPS), supaya tidak perlu
-        # duplikasi state dan selalu konsisten dengan kondisi RPS terkini.
-        info_export = dict(st.session_state.info_umum)
-        info_export["tanggal_dokumen"] = tgl_tampil
-        info_export["dosen_pengampu"] = nama_pengunduh
+        st.divider()
+        st.subheader("Ajukan ke Kaprodi")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            docx_buf = build_docx(
-                prodi=st.session_state.prodi_sel, mk_row=mk_row, cpl_df=cpl_df,
-                info_umum=info_export, cpmk_data=st.session_state.cpmk_data,
-                pertemuan_data=st.session_state.pertemuan_data,
-                referensi_data=st.session_state.referensi_data,
-                komponen_data=st.session_state.komponen_data,
-                bobot_kategori=BOBOT_KATEGORI,
+        if not bisa_edit:
+            st.info(
+                f"RPS ini berstatus **{status_label.get(status_saat_ini, status_saat_ini)}** - "
+                "sudah diajukan/diproses, tidak perlu diajukan ulang."
             )
-            st.download_button("⬇️ Unduh Word (.docx)", data=docx_buf,
-                                file_name=f"RPS_{mk_row['Kode MK']}.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                key="download_docx_btn")
-        with col2:
-            if find_soffice() is None:
-                st.warning(
-                    "PDF butuh LibreOffice terpasang di komputer ini (supaya PDF-nya dijamin identik "
-                    "dengan Word, karena dibuat dengan mengonversi file Word yang sama, bukan dibangun "
-                    "terpisah). Unduh & pasang dulu dari [libreoffice.org/download]"
-                    "(https://www.libreoffice.org/download/download/), lalu restart aplikasi ini. "
-                    "Word (.docx) di sebelah kiri tetap bisa diunduh tanpa LibreOffice."
-                )
-            else:
-                docx_buf.seek(0)
-                pdf_buf = build_pdf_via_libreoffice(docx_buf)
-                docx_buf.seek(0)
-                if pdf_buf is None:
-                    st.error("Gagal membuat PDF (LibreOffice ditemukan tapi konversi gagal). Coba lagi, "
-                              "atau unduh versi Word-nya dan simpan-sebagai-PDF secara manual dari Word.")
-                else:
-                    st.download_button("⬇️ Unduh PDF", data=pdf_buf,
-                                        file_name=f"RPS_{mk_row['Kode MK']}.pdf", mime="application/pdf",
-                                        key="download_pdf_btn")
+        elif not st.session_state.get("_rps_id"):
+            st.info("Simpan RPS ke database terlebih dahulu (tombol di sidebar) sebelum bisa diajukan.")
+        elif st.session_state.get("_confirm_ajukan"):
+            st.warning(
+                "⚠️ **Pastikan kembali sebelum mengajukan:** cek semua isian (Info Umum, "
+                "CPL & CPMK, 16 Pertemuan, Daftar Pustaka, Komponen Penilaian) sudah benar "
+                "dan lengkap. Setelah diajukan, RPS akan **terkunci** dan tidak bisa diedit "
+                "lagi sampai Kaprodi selesai mereview."
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(
+                    "✅ Ya, Ajukan Sekarang", key="konfirmasi_ajukan_btn",
+                    use_container_width=True, type="primary",
+                ):
+                    issues = get_komponen_issues()
+                    if issues:
+                        st.error(
+                            "Belum bisa diajukan - persentase Komponen Penilaian belum pas "
+                            "(cek tab 'Komponen Penilaian'):\n"
+                            + "\n".join(f"- {msg}" for msg in issues)
+                        )
+                    else:
+                        try:
+                            ajukan_rps(client, st.session_state["_rps_id"])
+                            st.session_state["_rps_status"] = "diajukan"
+                            st.session_state["_rps_catatan"] = None
+                            st.session_state["_rps_catatan_bpm"] = None
+                            st.session_state["_rps_diajukan_pada"] = datetime.now().isoformat()
+                            st.session_state["_confirm_ajukan"] = False
+                            st.success("RPS diajukan ke Kaprodi untuk direview.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Gagal mengajukan: {e}")
+            with c2:
+                if st.button("❌ Batal", key="batal_ajukan_btn", use_container_width=True):
+                    st.session_state["_confirm_ajukan"] = False
+                    st.rerun()
+        else:
+            if st.button(
+                "📤 Ajukan ke Kaprodi", key="ajukan_btn",
+                use_container_width=True, type="primary",
+            ):
+                st.session_state["_confirm_ajukan"] = True
+                st.rerun()

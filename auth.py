@@ -38,8 +38,9 @@ Keterbatasan yang disengaja (supaya tetap sederhana & 100% bisa diandalkan):
     setelah delete() dengan mekanisme konfirmasi tambahan.
 """
 
+import httpx
 import streamlit as st
-from supabase import create_client
+from supabase import ClientOptions, create_client
 
 from supabase_config import load_supabase_config
 
@@ -57,7 +58,20 @@ def get_client():
                 "SUPABASE_URL & SUPABASE_ANON_KEY, lalu jalankan ulang aplikasi."
             )
             st.stop()
-        st.session_state["_supabase_client"] = create_client(cfg["url"], cfg["anon_key"])
+        st.session_state["_supabase_client"] = create_client(
+            cfg["url"], cfg["anon_key"],
+            options=ClientOptions(
+                # Penyesuaian: timeout bawaan httpx (~5 detik) sering terlalu
+                # pendek untuk auth.sign_up() - server Supabase bisa perlu
+                # waktu lebih lama menunggu proses kirim email konfirmasi
+                # (SMTP) selesai sebelum membalas, walau akunnya sendiri
+                # sudah keburu dibuat. Kalau timeout ini tercapai, muncul
+                # error "The read operation timed out" di layar padahal
+                # akunnya sudah aktif - client dengan timeout lebih longgar
+                # ini mengurangi kejadian tersebut.
+                httpx_client=httpx.Client(timeout=httpx.Timeout(30.0)),
+            ),
+        )
 
     client = st.session_state["_supabase_client"]
 
@@ -143,9 +157,21 @@ def _login_form():
                     )
                 else:
                     try:
+                        cfg = load_supabase_config()
                         client.auth.sign_up({
                             "email": email_d, "password": password_d,
-                            "options": {"data": {"nip": nip_bersih}},
+                            "options": {
+                                "data": {"nip": nip_bersih},
+                                # Penyesuaian: tanpa ini, link konfirmasi di email
+                                # mengarah ke Site URL default project Supabase
+                                # (sisa localhost dari development lokal dulu),
+                                # bikin user bingung. app_base_url dari config
+                                # (lihat supabase_config.py) - URL ini JUGA harus
+                                # ditambahkan ke daftar "Redirect URLs" di Supabase
+                                # Dashboard (Authentication -> URL Configuration),
+                                # kalau tidak akan ditolak dan kembali ke default.
+                                "email_redirect_to": cfg["app_base_url"],
+                            },
                         })
                         st.success(
                             f"Akun berhasil dibuat atas nama **{nama_terdaftar}**. Kalau konfirmasi "
@@ -153,7 +179,14 @@ def _login_form():
                             "bisa Masuk. Kalau sudah dimatikan, langsung bisa dipakai di tab \"Masuk\"."
                         )
                     except Exception as e:
-                        st.error(f"Gagal daftar: {e}")
+                        st.error(
+                            f"Gagal daftar: {e}\n\n"
+                            "Kalau pesannya soal *timeout* (koneksi lambat), akun kemungkinan "
+                            "**tetap berhasil dibuat** di server sebelum koneksinya terputus - "
+                            "coba langsung ke tab \"Masuk\" dengan email & password yang tadi "
+                            "diisi, jangan ulangi Daftar (nanti malah gagal karena email sudah "
+                            "terpakai)."
+                        )
 
     with tab_lupa:
         st.caption(
