@@ -30,7 +30,7 @@ TEMPLATE_PATH = os.path.join(ASSETS_DIR, "rps_template.docx")
 
 # Dipindah ke sini (dari app.py) supaya bisa dipakai bersama oleh app.py sendiri
 # dan rps_browse.py (halaman "RPS Disetujui") tanpa duplikasi/import silang.
-BOBOT_KATEGORI = {"Kehadiran dan Sikap": 30, "UTS": 20, "Tugas": 20, "UAS": 30}
+BOBOT_KATEGORI = {"Interaksi": 30, "UTS": 20, "Tugas": 20, "UAS": 30}
 
 # Urutan minggu -> indeks baris tabel pertemuan pada template BARU. Berbeda dari
 # template lama: minggu ke-8 (UTS) sekarang PUNYA barisnya sendiri (tidak dilompati),
@@ -196,20 +196,27 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
     r8 = t.rows[8].cells
     set_cell_text(r8[1], info_umum.get("deskripsi_mk", "") or "-")
 
-    # --- QR Koordinator & Kaprodi (baris 3, kolom 4 & 6) - BARU, menggantikan blok
-    #     tanda tangan terpisah di akhir dokumen dari template lama. Selnya di-
-    #     vertical-merge menutupi baris 3-7 (Kode s/d Dosen Pengampu) di template
-    #     asli, tapi konten sungguhan cuma ada di baris asal (baris 3) - baris 4-7
-    #     cuma penanda lanjutan merge, TIDAK PERLU (dan tidak boleh) ditulis lagi. ---
+    # --- QR Koordinator, Kaprodi & BPM (baris 3, kolom 3/5/7) - menggantikan
+    #     blok tanda tangan terpisah di akhir dokumen dari template lama.
+    #     PENTING: index kolom BERGESER dari revisi template sebelumnya karena
+    #     tabel identitas sekarang 8 kolom (dulu 7) untuk menampung slot BPM -
+    #     koordinator 4->3, kaprodi 6->5 (diverifikasi ulang lewat XML mentah,
+    #     bukan tebakan). Selnya di-vertical-merge menutupi baris 3-7 (Kode s/d
+    #     Dosen Pengampu), tapi konten sungguhan cuma ada di baris asal (baris
+    #     3) - baris 4-7 cuma penanda lanjutan merge, TIDAK PERLU ditulis lagi. ---
     kode_mk = str(mk_row.get("Kode MK", "-"))
     nama_mk = mk_row.get("Nama Mata Kuliah", "-")
     fill_qr_cell(
-        r3[4], "disusun", kode_mk, nama_mk,
+        r3[3], "disusun", kode_mk, nama_mk,
         info_umum.get("dosen_koordinator"), "Koordinator Mata Kuliah", tgl,
     )
     fill_qr_cell(
-        r3[6], "disetujui", kode_mk, nama_mk,
+        r3[5], "disetujui", kode_mk, nama_mk,
         info_umum.get("nama_kaprodi"), "Ketua Program Studi", tgl,
+    )
+    fill_qr_cell(
+        r3[7], "divalidasi", kode_mk, nama_mk,
+        info_umum.get("nama_biro_pjm"), "Ka. Biro Penjaminan Mutu", tgl,
     )
 
     # --- CPL (baris 11-15) ---
@@ -228,14 +235,15 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
         set_cell_text(row_cells[1], with_code(c["deskripsi"], c["cpl_kode"]))
 
     # --- Mapping CPMK -> Komponen Penilaian (baris 24-28); urutan kolom template:
-    #     Kehadiran dan Sikap | UTS | Tugas | UAS. Kolom Tugas & UAS di file asli
-    #     memakai gridSpan 2 kolom mentah, jadi WAJIB pakai sel yang sudah di-dedup.
-    #     BARU: bukan checklist lagi - tiap sel diisi PERSENTASE kontribusi CPMK
-    #     tsb ke komponen itu (komponen_data[i] = {kategori: persen}). Total
-    #     persentase satu kolom (dijumlah semua CPMK) seharusnya PAS sama dengan
-    #     bobot_kategori kolom itu - divalidasi di app.py sebelum RPS diajukan,
-    #     BUKAN di sini (fungsi ini murni menulis apa adanya). ---
-    kolom_urutan = ["Kehadiran dan Sikap", "UTS", "Tugas", "UAS"]
+    #     Interaksi | UTS | Tugas | UAS (kategori "Kehadiran dan Sikap" lama
+    #     berganti nama jadi "Interaksi" - lihat BOBOT_KATEGORI). Kolom UTS,
+    #     Tugas & UAS di file asli memakai gridSpan 2 kolom mentah, jadi WAJIB
+    #     pakai sel yang sudah di-dedup. Tiap sel diisi PERSENTASE kontribusi
+    #     CPMK tsb ke komponen itu (komponen_data[i] = {kategori: persen}).
+    #     Total persentase satu kolom (dijumlah semua CPMK) seharusnya PAS sama
+    #     dengan bobot_kategori kolom itu - divalidasi di app.py sebelum RPS
+    #     diajukan, BUKAN di sini (fungsi ini murni menulis apa adanya). ---
+    kolom_urutan = ["Interaksi", "UTS", "Tugas", "UAS"]
     for i in range(1, 6):
         row_cells = dedup_row_cells(t.rows[23 + i])
         cpmk_kat = komponen_data.get(i)
@@ -254,28 +262,57 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
     for j, kat in enumerate(kolom_urutan, start=1):
         set_cell_text(bobot_row_cells[j], f"{bobot_kategori.get(kat, 0)}%")
 
-    # --- Daftar Pustaka (baris 31 - bergeser 1 baris dari template lama karena
-    #     ada tambahan baris Bobot Nilai di atasnya) ---
+    # --- Level Penggunaan AI (baris 31) - BARU, template lama tidak punya baris
+    #     ini. Selnya punya 2 paragraf terpisah (sama pola dengan sel QR):
+    #     [0]=pilihan level, [1]=deskripsi. Opsional - kalau kosong, tampilkan
+    #     placeholder yang jelas, bukan dibiarkan blank membingungkan. ---
+    ai_cell = dedup_row_cells(t.rows[31])[1]
+    ai_paras = ai_cell.paragraphs
+    set_paragraph_text(ai_paras[0], info_umum.get("level_ai") or "(belum dipilih)")
+    if len(ai_paras) > 1:
+        set_paragraph_text(ai_paras[1], info_umum.get("deskripsi_ai") or "(belum diisi)")
+
+    # --- Daftar Pustaka (baris 32 - bergeser lagi 1 baris karena ada tambahan
+    #     baris Level Penggunaan AI tepat di atasnya) ---
     pustaka_lines = [ref["sitasi"] for ref in referensi_data if ref.get("sitasi")]
     pustaka_text = "\n".join(f"{i}. {t_}" for i, t_ in enumerate(pustaka_lines, start=1)) or "(belum diisi)"
-    set_cell_text(t.rows[31].cells[1], pustaka_text)
+    set_cell_text(t.rows[32].cells[1], pustaka_text)
 
 
-def fill_pertemuan_table(document, pertemuan_data):
+def fill_pertemuan_table(document, pertemuan_data, sks):
     t = document.tables[1]
+    # Keterangan Waktu = SKS x rasio menit/minggu baku (Tatap Muka 50,
+    # Belajar Terstruktur 60, Belajar Mandiri 60 - sesuai contoh isian yang
+    # sudah disiapkan di template: "[TM: 1x (SKSx50 menit)]" dst.). SAMA untuk
+    # semua 16 minggu karena SKS satu mata kuliah memang tetap, bukan berubah
+    # per minggu.
+    try:
+        sks_int = int(sks)
+    except (TypeError, ValueError):
+        sks_int = None
+    if sks_int is not None:
+        keterangan_waktu = (
+            f"\n\nWaktu:\n"
+            f"[TM: 1x ({sks_int}x50 menit)]\n"
+            f"[BT: 1x ({sks_int}x60 menit)]\n"
+            f"[BM: 1x ({sks_int}x60 menit)]"
+        )
+    else:
+        keterangan_waktu = ""
+
     for minggu, row_idx in MINGGU_TO_ROW.items():
         p = pertemuan_data.get(minggu, {})
         cells = t.rows[row_idx].cells
         # urutan kolom BERSIH pada template baru (7 kolom, tanpa duplikasi gridSpan
         # seperti template lama): 0=Minggu 1=Sub-CPMK 2=Bloom 3=Indikator
-        # 4=Bentuk Asesmen 5=Metode+Daring(gabungan) 6=Materi
+        # 4=Bentuk Asesmen 5=Metode+Daring(gabungan, + Keterangan Waktu) 6=Materi
         sub_text = with_code(p.get("sub_cpmk_desc", ""), p.get("cpmk_ref"))
         set_cell_text(cells[1], sub_text)
         set_cell_text(cells[2], ", ".join(p.get("bloom", [])))
         set_cell_text(cells[3], p.get("indikator", ""))
         set_cell_text(cells[4], p.get("bentuk_asesmen", ""))
         metode_daring = ", ".join(list(p.get("metode", [])) + list(p.get("bentuk", [])))
-        set_cell_text(cells[5], metode_daring)
+        set_cell_text(cells[5], metode_daring + keterangan_waktu)
         set_cell_text(cells[6], p.get("materi", ""))
 
 
@@ -300,7 +337,7 @@ def build_docx(prodi, mk_row, cpl_df, info_umum, cpmk_data,
     apply_fixed_layout_everywhere(document)
     fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
                      komponen_data, bobot_kategori, referensi_data)
-    fill_pertemuan_table(document, pertemuan_data)
+    fill_pertemuan_table(document, pertemuan_data, mk_row.get("SKS"))
 
     buf = io.BytesIO()
     document.save(buf)

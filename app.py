@@ -22,6 +22,7 @@ import io
 import glob
 import os
 import json
+import hashlib
 from datetime import datetime
 
 import pandas as pd
@@ -42,9 +43,10 @@ from auth import require_login, get_client
 from db_master import list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum
 from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
+from bpm_panel import render_bpm_panel
 from rps_store import load_rps, save_rps, ajukan_rps, tarik_pengajuan_rps
 from rps_saya import render_rps_saya
-from rps_browse import render_rps_disetujui
+from rps_browse import render_rps_tervalidasi
 
 # --------------------------------------------------------------------------
 # Konstanta
@@ -181,7 +183,7 @@ def format_tanggal_indonesia(iso_str):
 
 N_CPL_WAJIB = 5
 N_MINGGU = 16
-KATEGORI_PENILAIAN = ["Kehadiran dan Sikap", "UTS", "Tugas", "UAS"]
+KATEGORI_PENILAIAN = ["Interaksi", "UTS", "Tugas", "UAS"]
 HEADER_BLUE = "#92CDDC"  # warna header tabel utama, sesuai template resmi terbaru
 
 st.set_page_config(page_title="RPS Builder · UNSIA", layout="wide")
@@ -281,6 +283,7 @@ def init_state():
             "rumpun_mk": "",
             "nama_kaprodi": "", "nama_koordinator": "", "nama_penyusun": "",
             "nama_biro_pjm": "", "tanggal_dokumen": "",
+            "level_ai": "", "deskripsi_ai": "",
         },
         "cpmk_data": {i: {"cpl_kode": None, "deskripsi": ""} for i in range(1, 6)},
         "pertemuan_data": default_pertemuan(),
@@ -372,9 +375,19 @@ def _normalize_komponen_row(value):
     tunggal/string dari sebelum itu) TIDAK membawa info persentase sama
     sekali, jadi RPS lama otomatis di-reset ke 0 untuk tab Komponen Penilaian
     ini saja - Dosen perlu mengisi ulang pembagian persentasenya (isi CPMK &
-    bagian lain RPS TIDAK terpengaruh/tidak hilang)."""
+    bagian lain RPS TIDAK terpengaruh/tidak hilang).
+
+    Kategori "Kehadiran dan Sikap" berganti nama jadi "Interaksi" - kalau
+    data lama masih pakai nama lama, petakan ke nama baru DULU supaya
+    nilainya (persentase yang sudah diisi) tidak ikut hilang seperti
+    perubahan struktur lain di atas - ini murni rename, bukan perubahan
+    makna, jadi datanya tetap valid untuk dibawa.
+    """
     if isinstance(value, dict):
-        return {kat: int(value.get(kat) or 0) for kat in KATEGORI_PENILAIAN}
+        migrated = dict(value)
+        if "Kehadiran dan Sikap" in migrated and "Interaksi" not in migrated:
+            migrated["Interaksi"] = migrated.pop("Kehadiran dan Sikap")
+        return {kat: int(migrated.get(kat) or 0) for kat in KATEGORI_PENILAIAN}
     return {kat: 0 for kat in KATEGORI_PENILAIAN}
 
 
@@ -391,6 +404,89 @@ def get_komponen_issues():
         if total != target:
             issues.append(f"{kategori}: total {total}% (seharusnya {target}%)")
     return issues
+
+
+def _hash_rps_data(data):
+    """Hash konten RPS (urutan key konsisten) - dipakai auto-save (dan tombol
+    manual) untuk tahu "sudah tersimpan persis seperti ini sebelumnya atau
+    belum" - supaya auto-save tidak menyimpan (dan mencatat baris riwayat
+    baru) berulang-ulang padahal tidak ada perubahan apa pun sejak terakhir
+    disimpan."""
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def simpan_progres_button(key_suffix, primary=False, label="💾 Simpan Progres ke Database"):
+    """Tombol Simpan yang SAMA dipakai ulang di sidebar DAN di bagian atas
+    tiap tab (Info Umum, CPL&CPMK, 16 Pertemuan, dst.) - supaya tidak perlu
+    scroll balik ke sidebar tiap kali mau menyimpan, terutama di tab yang
+    isinya panjang (mis. 16 Pertemuan). key_suffix WAJIB beda-beda di tiap
+    lokasi supaya tidak duplicate-key error. Otomatis disembunyikan kalau
+    status RPS sedang tidak bisa diedit (diajukan/disetujui/divalidasi).
+    Membaca client/mk_row/pengguna dari scope global - sama seperti pola
+    get_komponen_issues() di atas terhadap session_state."""
+    status_saat_ini = st.session_state.get("_rps_status") or "draft"
+    if status_saat_ini not in ("draft", "ditolak"):
+        return
+    if st.button(label, key=f"save_progres_{key_suffix}",
+                 type="primary" if primary else "secondary", use_container_width=True):
+        try:
+            data = state_to_rps_data()
+            saved = save_rps(client, mk_row["id"], pengguna["id"], data)
+            st.session_state["_rps_id"] = saved["id"]
+            st.session_state["_rps_status"] = saved["status"]
+            st.session_state["_rps_last_saved_hash"] = _hash_rps_data(data)
+            st.success("✅ Progres tersimpan.")
+        except Exception as e:
+            st.error(f"Gagal menyimpan: {e}")
+
+
+@st.fragment(run_every=60)
+def auto_save_fragment():
+    """Auto-save berkala (~60 detik) selagi Dosen mengisi RPS - lapisan
+    TAMBAHAN di atas tombol Simpan manual (simpan_progres_button), supaya
+    progres tidak hilang total kalau tidak sengaja refresh sebelum sempat
+    klik Simpan sendiri.
+
+    CATATAN JUJUR: @st.fragment(run_every=...) adalah fitur BAWAAN Streamlit
+    (bukan library pihak ketiga seperti komponen cookie yang pernah dicoba
+    dan dibatalkan sebelumnya) - tapi belum pernah dipakai di proyek ini,
+    jadi tetap perlu diuji nyata: buka salah satu RPS, tunggu >=60 detik
+    sambil isi sesuatu, lihat apakah caption "Auto-save terakhir" di sidebar
+    ikut berubah tanpa perlu klik apa pun. Butuh Streamlit >=1.37 (lihat
+    requirements.txt) - kalau versi lebih lama, decorator ini akan error saat
+    aplikasi dijalankan, bukan gagal diam-diam.
+
+    Membaca client/mk_row/pengguna dari scope global (sama seperti
+    simpan_progres_button) - TIDAK dipanggil sebelum mk_row ada (dipanggil
+    setelah blok sidebar "Isi Mata Kuliah" selesai, lihat titik panggilnya).
+
+    Sengaja TIDAK menyimpan kalau:
+    - status sedang tidak bisa diedit (diajukan/disetujui/divalidasi) - sama
+      seperti syarat simpan_progres_button, supaya tidak mencoba menyimpan
+      sesuatu yang memang akan ditolak RLS database
+    - isi RPS PERSIS SAMA dengan penyimpanan terakhir (dicek lewat hash) -
+      supaya tidak membuat baris riwayat perubahan baru terus-menerus tanpa
+      perubahan berarti (tabel rps_riwayat dicatat otomatis oleh trigger
+      database tiap kali baris rps di-update, lihat sql/schema.sql)
+    Gagal auto-save (mis. sedang tidak ada koneksi internet sesaat) SENGAJA
+    didiamkan tanpa munculkan error - supaya tidak mengganggu Dosen yang
+    sedang fokus mengetik dengan popup setiap menit.
+    """
+    status_saat_ini = st.session_state.get("_rps_status") or "draft"
+    if status_saat_ini not in ("draft", "ditolak"):
+        return
+    data = state_to_rps_data()
+    current_hash = _hash_rps_data(data)
+    if current_hash == st.session_state.get("_rps_last_saved_hash"):
+        return
+    try:
+        saved = save_rps(client, mk_row["id"], pengguna["id"], data)
+        st.session_state["_rps_id"] = saved["id"]
+        st.session_state["_rps_status"] = saved["status"]
+        st.session_state["_rps_last_saved_hash"] = current_hash
+        st.session_state["_rps_last_autosave_at"] = datetime.now().strftime("%H:%M:%S")
+    except Exception:
+        pass
 
 
 def apply_rps_data_to_state(data):
@@ -436,7 +532,7 @@ def serialize_progress_excel(mk_row):
     info = st.session_state.info_umum
     for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
                 "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
-                "nama_biro_pjm", "tanggal_dokumen"):
+                "nama_biro_pjm", "tanggal_dokumen", "level_ai", "deskripsi_ai"):
         ws_meta.append([key, info.get(key, "")])
 
     ws_cpl = wb.create_sheet("CPL_Selected")
@@ -486,7 +582,7 @@ def load_progress_excel(uploaded_file):
         # baru) tidak sampai hilang dan menyebabkan KeyError di tempat lain.
         for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
                     "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
-                    "nama_biro_pjm", "tanggal_dokumen"):
+                    "nama_biro_pjm", "tanggal_dokumen", "level_ai", "deskripsi_ai"):
             st.session_state.info_umum[key] = meta.get(key) or st.session_state.info_umum.get(key, "")
 
     if "CPL_Selected" in wb.sheetnames:
@@ -546,11 +642,13 @@ st.caption("Universitas Siber Asia")
 # masing. Ini supaya Kaprodi yang juga mengajar (jadi koordinator Mata
 # Kuliahnya sendiri) tetap bisa mengisi RPS-nya sendiri, bukan terkunci
 # hanya ke panel Kaprodi.
-menu_options = ["✏️ Isi RPS", "📋 RPS Saya", "📚 RPS Disetujui"]
+menu_options = ["✏️ Isi RPS", "📋 RPS Saya", "📚 RPS Tervalidasi"]
 if pengguna["role"] == "kaprodi":
     menu_options.append("✅ Review Kaprodi")
 elif pengguna["role"] == "admin":
     menu_options.append("⚙️ Panel Admin")
+elif pengguna["role"] == "bpm":
+    menu_options.append("✅ Validasi BPM")
 
 # Fase 4: kalau tombol "Buka" di halaman RPS Saya baru saja diklik, paksa
 # menu balik ke "Isi RPS". HARUS dicek di sini, SEBELUM widget menu_utama
@@ -566,14 +664,17 @@ menu = st.radio(
 if menu == "📋 RPS Saya":
     render_rps_saya(client, pengguna)
     st.stop()
-elif menu == "📚 RPS Disetujui":
-    render_rps_disetujui(client, pengguna)
+elif menu == "📚 RPS Tervalidasi":
+    render_rps_tervalidasi(client, pengguna)
     st.stop()
 elif menu == "✅ Review Kaprodi":
     render_kaprodi_panel(client, pengguna)
     st.stop()
 elif menu == "⚙️ Panel Admin":
     render_admin_panel(client)
+    st.stop()
+elif menu == "✅ Validasi BPM":
+    render_bpm_panel(client, pengguna)
     st.stop()
 
 with st.sidebar:
@@ -680,11 +781,13 @@ with st.sidebar:
             st.session_state["_rps_id"] = existing["id"]
             st.session_state["_rps_status"] = existing["status"]
             st.session_state["_rps_catatan"] = existing.get("catatan_kaprodi")
+            st.session_state["_rps_catatan_bpm"] = existing.get("catatan_bpm")
             st.session_state["_rps_diajukan_pada"] = existing.get("diajukan_pada")
         else:
             st.session_state["_rps_id"] = None
             st.session_state["_rps_status"] = None
             st.session_state["_rps_catatan"] = None
+            st.session_state["_rps_catatan_bpm"] = None
             st.session_state["_rps_diajukan_pada"] = None
 
         st.rerun()
@@ -699,8 +802,9 @@ with st.sidebar:
     st.subheader("💾 Simpan RPS")
     status_saat_ini = st.session_state.get("_rps_status") or "draft"
     status_label = {
-        "draft": "📝 Draft", "diajukan": "📤 Diajukan",
-        "disetujui": "✅ Disetujui", "ditolak": "↩️ Ditolak",
+        "draft": "📝 Draft", "diajukan": "📤 Diajukan (menunggu Kaprodi)",
+        "disetujui": "✅ Disetujui Kaprodi (menunggu BPM)",
+        "ditolak": "↩️ Ditolak", "divalidasi": "✅ Tervalidasi (Final)",
     }
     bisa_edit = status_saat_ini in ("draft", "ditolak")
 
@@ -709,18 +813,19 @@ with st.sidebar:
     else:
         st.caption("Belum pernah disimpan ke database untuk Mata Kuliah ini.")
 
-    if status_saat_ini == "ditolak" and st.session_state.get("_rps_catatan"):
-        st.warning(f"**Catatan Kaprodi:** {st.session_state['_rps_catatan']}")
+    if st.session_state.get("_rps_last_autosave_at"):
+        st.caption(f"🔄 Auto-save terakhir: {st.session_state['_rps_last_autosave_at']}")
+
+    # Catatan penolakan bisa dari Kaprodi ATAU BPM (ditolak di tahap mana pun
+    # sama-sama balik ke status 'ditolak') - tampilkan yang mana pun terisi.
+    if status_saat_ini == "ditolak":
+        if st.session_state.get("_rps_catatan_bpm"):
+            st.warning(f"**Catatan BPM (ditolak):** {st.session_state['_rps_catatan_bpm']}")
+        elif st.session_state.get("_rps_catatan"):
+            st.warning(f"**Catatan Kaprodi (ditolak):** {st.session_state['_rps_catatan']}")
 
     if bisa_edit:
-        if st.button("💾 Simpan ke Database", key="save_rps_btn", type="primary", use_container_width=True):
-            try:
-                saved = save_rps(client, mk_row["id"], pengguna["id"], state_to_rps_data())
-                st.session_state["_rps_id"] = saved["id"]
-                st.session_state["_rps_status"] = saved["status"]
-                st.success("RPS berhasil disimpan ke database.")
-            except Exception as e:
-                st.error(f"Gagal menyimpan: {e}")
+        simpan_progres_button("sidebar", primary=True, label="💾 Simpan ke Database")
 
         if st.session_state.get("_rps_id"):
             if st.button("📤 Ajukan ke Kaprodi", key="ajukan_btn", use_container_width=True):
@@ -736,6 +841,7 @@ with st.sidebar:
                         ajukan_rps(client, st.session_state["_rps_id"])
                         st.session_state["_rps_status"] = "diajukan"
                         st.session_state["_rps_catatan"] = None
+                        st.session_state["_rps_catatan_bpm"] = None
                         st.session_state["_rps_diajukan_pada"] = datetime.now().isoformat()
                         st.success("RPS diajukan ke Kaprodi untuk direview.")
                         st.rerun()
@@ -826,6 +932,12 @@ with st.sidebar:
                 "menyediakan API key bersama sebagai opsi tambahan bagi semua Dosen."
             )
 
+# Opsi B: auto-save berkala (~60 detik) - dipanggil di SINI (bukan di dalam
+# "with st.sidebar:" di atas) karena tidak perlu render UI apa pun sendiri,
+# murni tugas latar belakang. Ditaruh setelah blok sidebar selesai supaya
+# mk_row (dibutuhkan fungsinya) sudah pasti ada.
+auto_save_fragment()
+
 
 def mk_key(suffix):
     """Bikin widget key yang unik & stabil per Mata Kuliah aktif.
@@ -842,6 +954,8 @@ tab_info, tab_cpl, tab_pertemuan, tab_ref, tab_nilai, tab_export = st.tabs(
 
 # --- Tab: Info Umum ---
 with tab_info:
+    simpan_progres_button("info_umum")
+    st.divider()
     st.subheader("Informasi Umum RPS")
     info = st.session_state.info_umum
     info["dosen_koordinator"] = st.text_input(
@@ -869,8 +983,17 @@ with tab_info:
         help="Terisi otomatis dari config/pejabat.txt, boleh diedit. Muncul di QR Kaprodi pada dokumen.",
     )
 
+    st.divider()
+    st.subheader("Ka. Biro Penjaminan Mutu (BPM)")
+    info["nama_biro_pjm"] = st.text_input(
+        "Nama Ka. Biro Penjaminan Mutu", info["nama_biro_pjm"], key=mk_key("nama_biro_pjm"),
+        help="Terisi otomatis dari config/pejabat.txt (KABIRO_PENJAMINAN_MUTU), boleh diedit. Muncul di QR BPM pada dokumen.",
+    )
+
 # --- Tab: CPL & CPMK ---
 with tab_cpl:
+    simpan_progres_button("cpl_cpmk")
+    st.divider()
     st.subheader("Pilih CPL Mata Kuliah")
     st.caption(f"Wajib memilih tepat {N_CPL_WAJIB} CPL untuk mata kuliah ini.")
     cpl_all = cpl_df["Kode CPL"].tolist()
@@ -914,6 +1037,8 @@ with tab_cpl:
 
 # --- Tab: 16 Pertemuan (accordion per minggu + opsi impor tabel) ---
 with tab_pertemuan:
+    simpan_progres_button("pertemuan_atas")
+    st.divider()
     st.subheader("Rincian 16 Pertemuan")
 
     with st.expander("📥 Impor dari Tabel (opsional): isi banyak minggu sekaligus"):
@@ -1069,8 +1194,30 @@ with tab_pertemuan:
             )
             p["indikator"] = c6.text_area("Indikator Penilaian", p["indikator"], key=mk_key(f"prt_indikator_{m}"))
 
+    st.divider()
+    simpan_progres_button("pertemuan_bawah", primary=True)
+
 # --- Tab: Daftar Pustaka ---
 with tab_ref:
+    simpan_progres_button("daftar_pustaka")
+    st.divider()
+    st.subheader("Level Penggunaan AI")
+    st.caption("Opsional, boleh dikosongkan - tidak menghalangi pengajuan ke Kaprodi.")
+    info = st.session_state.info_umum
+    pilihan_ai = ["(belum dipilih)", "Tanpa AI", "Assisted AI", "Free AI"]
+    current_ai = info.get("level_ai") or "(belum dipilih)"
+    level_ai_pilih = st.selectbox(
+        "Level Penggunaan AI", pilihan_ai,
+        index=pilihan_ai.index(current_ai) if current_ai in pilihan_ai else 0,
+        key=mk_key("level_ai"),
+    )
+    info["level_ai"] = "" if level_ai_pilih == "(belum dipilih)" else level_ai_pilih
+    info["deskripsi_ai"] = st.text_area(
+        "Deskripsi Penggunaan AI", info.get("deskripsi_ai", ""), key=mk_key("deskripsi_ai"),
+        help="Jelaskan bagaimana/di bagian mana AI dipakai (atau kenapa tidak dipakai) dalam penyusunan RPS/pembelajaran ini.",
+    )
+
+    st.divider()
     st.subheader("Daftar Pustaka")
     st.caption("Tautan materi/buku jika tersedia online.")
     for idx, ref in enumerate(st.session_state.referensi_data):
@@ -1085,6 +1232,8 @@ with tab_ref:
 
 # --- Tab: Komponen Penilaian (bagi persentase tiap kategori ke 5 CPMK) ---
 with tab_nilai:
+    simpan_progres_button("komponen_nilai")
+    st.divider()
     st.subheader("Komponen Penilaian")
     st.caption(
         "Untuk tiap komponen, bagi persentase bobotnya ke CPMK yang dinilai lewat "

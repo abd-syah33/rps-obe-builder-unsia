@@ -74,7 +74,7 @@ def render_review_rps(client):
                 if st.button("✅ Setujui", key=f"setuju_{row['id']}", use_container_width=True, type="primary"):
                     try:
                         setujui_rps(client, row["id"], catatan.strip() or None)
-                        st.success("RPS disetujui.")
+                        st.success("RPS disetujui - lanjut ke tahap validasi BPM.")
                         list_diajukan.clear()
                         st.rerun()
                     except Exception as e:

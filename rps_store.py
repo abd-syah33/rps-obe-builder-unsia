@@ -20,7 +20,10 @@ def load_rps(client, mata_kuliah_id):
     None kalau belum pernah diisi sama sekali."""
     resp = (
         client.table("rps")
-        .select("id, data, status, catatan_kaprodi, diajukan_pada, diproses_pada, created_at, updated_at")
+        .select(
+            "id, data, status, catatan_kaprodi, catatan_bpm, diajukan_pada, "
+            "diproses_pada, diproses_pada_bpm, created_at, updated_at"
+        )
         .eq("mata_kuliah_id", mata_kuliah_id)
         .limit(1)
         .execute()
@@ -125,19 +128,46 @@ def get_rps_stats(_client):
 
 
 @st.cache_data(ttl=30)
-def list_disetujui(_client):
-    """RPS berstatus 'disetujui' - RLS mengizinkan SEMUA Dosen yang login
-    membacanya (transparansi kurikulum: RPS resmi yang sudah disahkan boleh
-    dilihat & diunduh siapa saja, draft/diajukan/ditolak tetap privat).
-    Lihat policy "semua dosen baca rps disetujui" di sql/schema.sql."""
+def list_divalidasi(_client):
+    """RPS berstatus 'divalidasi' (lolos Kaprodi DAN BPM - final) - RLS
+    mengizinkan SEMUA Dosen yang login membacanya (transparansi kurikulum).
+    Draft/diajukan/disetujui(menunggu BPM)/ditolak tetap privat. Lihat policy
+    "semua dosen baca rps divalidasi" di sql/schema.sql."""
     resp = (
         _client.table("rps")
         .select(
-            "id, status, updated_at, diajukan_pada, diproses_pada, data, "
+            "id, status, updated_at, diajukan_pada, diproses_pada, diproses_pada_bpm, data, "
             "mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, sks, semester, prodi_id, prodi(nama))"
         )
-        .eq("status", "disetujui")
+        .eq("status", "divalidasi")
         .order("updated_at", desc=True)
         .execute()
     )
     return resp.data or []
+
+
+# --------------------------------------------------------------------------
+# Penyesuaian: Role BPM - validasi tahap kedua setelah Kaprodi menyetujui,
+# se-institusi (semua Prodi, tidak dibatasi seperti Kaprodi).
+# --------------------------------------------------------------------------
+@st.cache_data(ttl=15)
+def list_bpm_queue(_client):
+    """RPS berstatus 'disetujui' (menunggu validasi BPM) - RLS otomatis
+    membatasi ke akun ber-role bpm saja (lihat policy "bpm baca rps antrian
+    & riwayat"), TANPA filter Prodi (BPM se-institusi)."""
+    resp = (
+        _client.table("rps")
+        .select("id, status, updated_at, diproses_pada, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi(nama))")
+        .eq("status", "disetujui")
+        .order("diproses_pada")
+        .execute()
+    )
+    return resp.data or []
+
+
+def validasi_bpm_rps(client, rps_id, catatan=None):
+    client.rpc("validasi_bpm_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
+
+
+def tolak_bpm_rps(client, rps_id, catatan):
+    client.rpc("tolak_bpm_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()

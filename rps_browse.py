@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Halaman "RPS Disetujui" - transparansi kurikulum: semua Dosen yang login
-bisa MELIHAT & MENGUNDUH (bukan mengedit) RPS yang sudah disahkan Kaprodi,
-lintas Prodi. Akses dijamin lewat policy RLS "semua dosen baca rps disetujui"
-di sql/schema.sql - hanya status='disetujui' yang terbuka, draft/diajukan/
-ditolak orang lain tetap privat.
+"""Halaman "RPS Tervalidasi" - transparansi kurikulum: semua Dosen yang login
+bisa MELIHAT & MENGUNDUH (bukan mengedit) RPS yang sudah lolos KEDUA tahap
+validasi (Kaprodi menyetujui, LALU BPM memvalidasi), lintas Prodi. Akses
+dijamin lewat policy RLS "semua dosen baca rps divalidasi" di sql/schema.sql
+- hanya status='divalidasi' yang terbuka; draft/diajukan/disetujui (baru
+lolos Kaprodi, masih menunggu BPM)/ditolak tetap privat.
 
 Dokumen Word/PDF dibangun ULANG dari kolom `data` yang tersimpan (bukan dari
 session_state - RPS ini bukan milik/sedang diedit oleh yang membuka halaman
@@ -19,7 +20,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from rps_store import list_disetujui
+from rps_store import list_divalidasi
 from db_master import load_master_db
 from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOBOT_KATEGORI
 
@@ -27,7 +28,7 @@ from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOB
 def _format_tanggal_indonesia(iso_str):
     """Duplikat kecil dari app.py punya nama sama - sengaja tidak diimpor dari
     app.py supaya rps_browse.py tidak circular-import ke app.py (app.py sendiri
-    yang meng-import render_rps_disetujui dari modul ini)."""
+    yang meng-import render_rps_tervalidasi dari modul ini)."""
     if not iso_str:
         return None
     try:
@@ -54,19 +55,22 @@ def _data_to_export_args(data, tanggal_tampil, dosen_pengampu_tampil):
     }
 
 
-def render_rps_disetujui(client, pengguna):
-    st.title("📚 RPS Disetujui")
-    st.caption("RPS yang sudah disahkan Kaprodi - bisa dilihat & diunduh semua Dosen, tidak bisa diedit di sini.")
+def render_rps_tervalidasi(client, pengguna):
+    st.title("📚 RPS Tervalidasi")
+    st.caption(
+        "RPS yang sudah lolos Kaprodi DAN BPM (final) - bisa dilihat & diunduh "
+        "semua Dosen, tidak bisa diedit di sini."
+    )
 
-    rows = list_disetujui(client)
+    rows = list_divalidasi(client)
     if not rows:
-        st.info("Belum ada RPS yang disetujui sejauh ini.")
+        st.info("Belum ada RPS yang tervalidasi (lolos Kaprodi & BPM) sejauh ini.")
         return
 
     prodi_list = sorted({
         ((r.get("mata_kuliah") or {}).get("prodi") or {}).get("nama", "-") for r in rows
     })
-    prodi_filter = st.selectbox("Filter Program Studi", ["Semua"] + prodi_list, key="filter_prodi_disetujui")
+    prodi_filter = st.selectbox("Filter Program Studi", ["Semua"] + prodi_list, key="filter_prodi_tervalidasi")
     if prodi_filter != "Semua":
         rows = [
             r for r in rows
@@ -82,7 +86,7 @@ def render_rps_disetujui(client, pengguna):
 
         with st.container(border=True):
             st.markdown(f"**{nama_mk}** ({kode_mk}) · Kurikulum {tahun_kurikulum} · {prodi.get('nama', '-')}")
-            st.caption(f"Disahkan {row.get('diproses_pada') or row.get('updated_at', '-')}")
+            st.caption(f"Tervalidasi {row.get('diproses_pada_bpm') or row.get('updated_at', '-')}")
 
             siapkan_key = f"_siapkan_{row['id']}"
             if st.button("📄 Siapkan Unduhan", key=f"btn_siapkan_{row['id']}"):

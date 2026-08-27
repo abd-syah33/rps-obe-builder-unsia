@@ -157,7 +157,7 @@ def render_admin_panel(client):
                 use_container_width=True,
                 disabled=["Email"],
                 column_config={
-                    "Role": st.column_config.SelectboxColumn(options=["dosen", "kaprodi", "admin"]),
+                    "Role": st.column_config.SelectboxColumn(options=["dosen", "kaprodi", "admin", "bpm"]),
                 },
                 key="pengguna_editor",
             )

@@ -1090,3 +1090,152 @@ begin
     return new;
 end;
 $$;
+
+
+-- =============================================================================
+-- PENYESUAIAN: Role BPM (Biro Penjaminan Mutu) - validasi tahap KEDUA setelah
+-- Kaprodi menyetujui. Alur baru:
+--   draft -> diajukan -> disetujui (Kaprodi, MENUNGGU BPM) -> divalidasi (BPM, FINAL)
+-- Ditolak di tahap MANA PUN (Kaprodi atau BPM) -> balik ke 'ditolak', LANGSUNG
+-- ke Dosen untuk revisi (bukan ke Kaprodi dulu) - sesuai keputusan.
+-- BPM cakupannya SE-INSTITUSI (semua Prodi), seperti Admin - bukan per-Prodi
+-- seperti Kaprodi.
+--
+-- CATATAN MIGRASI: RPS yang SUDAH berstatus 'disetujui' dari SEBELUM fitur
+-- ini ada TIDAK diubah statusnya oleh bagian ini - otomatis masuk antrian
+-- BPM (dianggap "menunggu validasi", bukan langsung final). Tidak ada
+-- migrasi data yang perlu dijalankan terpisah untuk ini.
+-- =============================================================================
+
+-- Tambah 'bpm' ke peran yang diizinkan
+alter table public.pengguna drop constraint if exists pengguna_role_check;
+alter table public.pengguna add constraint pengguna_role_check
+    check (role in ('dosen', 'kaprodi', 'admin', 'bpm'));
+
+-- Tambah 'divalidasi' ke status RPS yang diizinkan
+alter table public.rps drop constraint if exists rps_status_check;
+alter table public.rps add constraint rps_status_check
+    check (status in ('draft', 'diajukan', 'disetujui', 'ditolak', 'divalidasi'));
+
+-- Kolom pencatatan aksi BPM, terpisah dari kolom Kaprodi yang sudah ada
+-- (catatan_kaprodi/diproses_oleh/diproses_pada) - supaya jelas siapa
+-- mencatat apa di tiap tahap.
+alter table public.rps add column if not exists catatan_bpm text;
+alter table public.rps add column if not exists diproses_oleh_bpm uuid references auth.users(id) on delete set null;
+alter table public.rps add column if not exists diproses_pada_bpm timestamptz;
+
+comment on column public.rps.catatan_bpm is
+    'Catatan BPM saat memvalidasi/menolak - wajib diisi kalau menolak, opsional kalau memvalidasi.';
+comment on column public.rps.diproses_oleh_bpm is
+    'Akun BPM yang terakhir memproses (memvalidasi/menolak) RPS ini.';
+comment on column public.rps.diproses_pada_bpm is
+    'Waktu terakhir diproses BPM (divalidasi/ditolak).';
+
+-- Helper: apakah pemanggil ber-role bpm (se-institusi, tidak terikat Prodi
+-- manapun - beda dari is_kaprodi_of() yang perlu parameter prodi_id).
+create or replace function public.is_bpm()
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select exists (select 1 from public.pengguna where id = auth.uid() and role = 'bpm');
+$$;
+
+-- BPM boleh baca RPS yang menunggu validasinya (disetujui) ATAU yang sudah
+-- pernah divalidasi (untuk referensi/riwayat) - se-institusi, semua Prodi.
+drop policy if exists "bpm baca rps antrian & riwayat" on public.rps;
+create policy "bpm baca rps antrian & riwayat" on public.rps
+    for select to authenticated
+    using (public.is_bpm() and status in ('disetujui', 'divalidasi'));
+
+-- Transparansi (dulu "semua dosen baca rps disetujui") sekarang mensyaratkan
+-- status divalidasi (lolos KEDUANYA - Kaprodi & BPM), bukan cuma disetujui
+-- Kaprodi lagi - sesuai keputusan.
+drop policy if exists "semua dosen baca rps disetujui" on public.rps;
+drop policy if exists "semua dosen baca rps divalidasi" on public.rps;
+create policy "semua dosen baca rps divalidasi" on public.rps
+    for select to authenticated
+    using (status = 'divalidasi');
+
+-- Fungsi aksi BPM (SECURITY DEFINER, pola sama seperti setujui_rps/tolak_rps
+-- Kaprodi) - hanya berlaku dari status 'disetujui', BUKAN update tabel rps
+-- langsung, supaya BPM tidak perlu akses UPDATE penuh ke tabel rps.
+create or replace function public.validasi_bpm_rps(target_rps_id uuid, catatan text default null)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+    if not public.is_bpm() then
+        raise exception 'Anda tidak berwenang memvalidasi RPS ini.';
+    end if;
+
+    update public.rps
+    set status = 'divalidasi', catatan_bpm = catatan, diproses_oleh_bpm = auth.uid(), diproses_pada_bpm = now()
+    where id = target_rps_id and status = 'disetujui';
+
+    if not found then
+        raise exception 'RPS sudah tidak berstatus "disetujui" (mungkin sudah diproses pihak lain).';
+    end if;
+end;
+$$;
+
+create or replace function public.tolak_bpm_rps(target_rps_id uuid, catatan text)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+    if not public.is_bpm() then
+        raise exception 'Anda tidak berwenang menolak RPS ini.';
+    end if;
+
+    if catatan is null or btrim(catatan) = '' then
+        raise exception 'Catatan alasan penolakan wajib diisi.';
+    end if;
+
+    update public.rps
+    set status = 'ditolak', catatan_bpm = catatan, diproses_oleh_bpm = auth.uid(), diproses_pada_bpm = now()
+    where id = target_rps_id and status = 'disetujui';
+
+    if not found then
+        raise exception 'RPS sudah tidak berstatus "disetujui" (mungkin sudah diproses pihak lain).';
+    end if;
+end;
+$$;
+
+grant execute on function public.validasi_bpm_rps(uuid, text) to authenticated;
+grant execute on function public.tolak_bpm_rps(uuid, text) to authenticated;
+
+
+-- Ganti ajukan_rps() sekali lagi - sekarang juga membersihkan kolom BPM
+-- (catatan_bpm dkk) saat re-submit, supaya catatan penolakan lama (dari
+-- Kaprodi ATAU BPM) tidak nyangkut ke siklus review berikutnya. Perilaku
+-- routing-nya SENGAJA tidak berubah: ajukan_rps() SELALU set status jadi
+-- 'diajukan' (antrian Kaprodi) apa pun status sebelumnya (ditolak Kaprodi
+-- ATAU ditolak BPM) - ini yang membuat "ajukan ulang ke Kaprodi dari awal"
+-- otomatis berlaku tanpa logika tambahan.
+create or replace function public.ajukan_rps(target_rps_id uuid)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+    update public.rps r
+    set status = 'diajukan',
+        catatan_kaprodi = null, diproses_oleh = null, diproses_pada = null,
+        catatan_bpm = null, diproses_oleh_bpm = null, diproses_pada_bpm = null,
+        diajukan_pada = now()
+    from public.mata_kuliah mk
+    where r.id = target_rps_id
+      and mk.id = r.mata_kuliah_id
+      and mk.koordinator_user_id = auth.uid()
+      and r.status in ('draft', 'ditolak');
+
+    if not found then
+        raise exception 'RPS tidak ditemukan, Anda bukan koordinatornya, atau statusnya tidak bisa diajukan.';
+    end if;
+end;
+$$;
