@@ -110,7 +110,6 @@ def main():
                     # "Ranah Topik", file baru (kalau sudah disesuaikan) pakai
                     # "Rumpun MK" - kolom database-nya sekarang bernama rumpun_mk.
                     "rumpun_mk": clean_str(row.get("Rumpun MK") if "Rumpun MK" in row else row.get("Ranah Topik")),
-                    "dosen_pengembang": clean_str(row.get("Dosen Pengembang")),
                 },
                 on_conflict="kode_mk,tahun_kurikulum",
             ).execute()

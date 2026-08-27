@@ -8,7 +8,7 @@ Cara menjalankan:
 
 Struktur data master:
     data/<Nama Prodi>.xlsx   -> setiap file mewakili 1 Program Studi
-        sheet 'Mata Kuliah'  -> kolom: No, Nama Mata Kuliah, Kode MK, SKS, Semester, Rumpun MK, Dosen Pengembang
+        sheet 'Mata Kuliah'  -> kolom: No, Nama Mata Kuliah, Kode MK, SKS, Semester, Rumpun MK
         sheet 'CPL'          -> kolom: Kode CPL, Deskripsi CPL
 
 Catatan teknis (widget perlu 2x klik):

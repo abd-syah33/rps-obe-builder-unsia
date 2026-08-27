@@ -17,7 +17,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-MK_DISPLAY_COLUMNS = ["Nama Mata Kuliah", "Kode MK", "SKS", "Semester", "Rumpun MK", "Dosen Pengembang"]
+MK_DISPLAY_COLUMNS = ["Nama Mata Kuliah", "Kode MK", "SKS", "Semester", "Rumpun MK"]
 CPL_DISPLAY_COLUMNS = ["Kode CPL", "Deskripsi CPL"]
 
 # Tahun kurikulum yang SELALU ditawarkan di dropdown, walau belum ada Mata
@@ -84,7 +84,7 @@ def load_master_db(_client, prodi_id, tahun_kurikulum):
     mk_resp = (
         _client.table("mata_kuliah")
         .select(
-            "id, nama_mk, kode_mk, sks, semester, rumpun_mk, dosen_pengembang, "
+            "id, nama_mk, kode_mk, sks, semester, rumpun_mk, "
             "koordinator_user_id, koordinator_nip"
         )
         .eq("prodi_id", prodi_id)
@@ -104,7 +104,6 @@ def load_master_db(_client, prodi_id, tahun_kurikulum):
                 "SKS": r.get("sks"),
                 "Semester": r.get("semester"),
                 "Rumpun MK": r.get("rumpun_mk") or "-",
-                "Dosen Pengembang": r.get("dosen_pengembang") or "",
             }
             for r in mk_rows
         ],
@@ -175,7 +174,6 @@ def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df):
             "sks": _clean_int(row.get("SKS")),
             "semester": _clean_int(row.get("Semester")),
             "rumpun_mk": _clean_str(row.get("Rumpun MK")),
-            "dosen_pengembang": _clean_str(row.get("Dosen Pengembang")),
         }
         client.table("mata_kuliah").upsert(payload, on_conflict="kode_mk,tahun_kurikulum").execute()
         saved += 1

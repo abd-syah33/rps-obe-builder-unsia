@@ -9,6 +9,7 @@ mengisi/mengubah RPS-nya - lihat sql/schema.sql bagian "Koordinator Mata
 Kuliah" untuk aturan aksesnya di level database.
 """
 
+import pandas as pd
 import streamlit as st
 
 from db_master import list_dosen, list_whitelist_menunggu, load_master_db, set_koordinator_mk
@@ -46,11 +47,16 @@ def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
             with col1:
                 st.markdown(f"**{mk['Kode MK']}** · {mk['Nama Mata Kuliah']}")
             with col2:
+                # Catatan: nilai kosong dari kolom Pandas yang bercampur
+                # string (UUID/NIP) dan None akan otomatis menjadi NaN
+                # (float) - bukan None - dan bool(NaN) adalah True di
+                # Python. Pakai pd.notna() supaya baris kosong tidak
+                # dianggap "ada isinya".
                 koor_id = mk.get("koordinator_user_id")
                 koor_nip = mk.get("koordinator_nip")
-                if koor_id:
+                if pd.notna(koor_id):
                     current_label = label_by_id.get(koor_id, BELUM_DITETAPKAN)
-                elif koor_nip:
+                elif pd.notna(koor_nip):
                     current_label = label_by_nip.get(koor_nip, f"(NIP {koor_nip}, belum Daftar)")
                 else:
                     current_label = BELUM_DITETAPKAN

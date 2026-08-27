@@ -946,6 +946,10 @@ $$;
 -- eksplisit supaya tidak ada dua versi nyangkut bersamaan.
 drop function if exists public.set_koordinator_mk(uuid, uuid);
 
+-- Penyesuaian: koordinator_nip sekarang TETAP terisi meskipun akun sudah
+-- terdaftar (koordinator_id) - diambil dari pengguna.nip milik akun
+-- tersebut, bukan dikosongkan lagi. NIP jadi identitas yang melekat pada
+-- dosen (berguna untuk laporan), bukan cuma placeholder staging.
 create or replace function public.set_koordinator_mk(
     target_mk_id uuid,
     koordinator_id uuid default null,
@@ -957,6 +961,7 @@ security definer set search_path = public
 as $$
 declare
     v_prodi_id uuid;
+    v_nip text;
 begin
     select prodi_id into v_prodi_id from public.mata_kuliah where id = target_mk_id;
     if v_prodi_id is null then
@@ -967,13 +972,16 @@ begin
         raise exception 'Anda tidak berwenang menetapkan koordinator untuk Mata Kuliah ini.';
     end if;
 
-    if koordinator_id is not null and not exists (select 1 from public.pengguna where id = koordinator_id) then
-        raise exception 'Akun Dosen tidak ditemukan.';
+    if koordinator_id is not null then
+        select nip into v_nip from public.pengguna where id = koordinator_id;
+        if not found then
+            raise exception 'Akun Dosen tidak ditemukan.';
+        end if;
     end if;
 
     update public.mata_kuliah
     set koordinator_user_id = koordinator_id,
-        koordinator_nip = case when koordinator_id is not null then null else koordinator_nip_baru end
+        koordinator_nip = case when koordinator_id is not null then v_nip else koordinator_nip_baru end
     where id = target_mk_id;
 end;
 $$;
@@ -1295,3 +1303,11 @@ $$;
 
 grant execute on function public.get_pejabat_prodi(uuid) to authenticated;
 grant execute on function public.get_pejabat_bpm() to authenticated;
+
+-- =============================================================================
+-- PENYESUAIAN: Hapus kolom dosen_pengembang (mata_kuliah) - peninggalan
+-- impor Excel lama, sudah tidak dipakai di alur RPS manapun (field "Dosen
+-- Pengembang RPS (Koordinator)" di form RPS diambil dari sistem koordinator,
+-- bukan dari kolom ini). Aman dijalankan berkali-kali.
+-- =============================================================================
+alter table public.mata_kuliah drop column if exists dosen_pengembang;
