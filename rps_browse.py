@@ -17,14 +17,17 @@ Tanggal-tanggal SEKARANG DIBEDAKAN per tahap, bukan disamaratakan: QR
 Koordinator ("disusun") & "Tanggal Penyusunan" = tanggal RPS diajukan
 (diajukan_pada), QR Kaprodi ("disetujui") = tanggal Kaprodi menyetujui
 (diproses_pada), QR BPM ("divalidasi") = tanggal BPM memvalidasi
-(diproses_pada_bpm)."""
+(diproses_pada_bpm). Nama Kaprodi & Ka. BPM JUGA ditarik ULANG di sini (bukan
+dipakai apa adanya dari data tersimpan) - supaya kalau Admin mengubah
+penetapan "pejabat resmi" (set_pejabat_utama) SETELAH RPS ini pernah dibuat,
+dokumen yang diunduh tetap mencerminkan pejabat yang berlaku SEKARANG."""
 
 from datetime import datetime
 
 import streamlit as st
 
 from rps_store import list_divalidasi
-from db_master import load_master_db
+from db_master import load_master_db, get_kaprodi_nama, get_bpm_nama
 from docx_export import build_docx, build_pdf_via_libreoffice, find_soffice, BOBOT_KATEGORI
 
 
@@ -45,12 +48,25 @@ def _format_tanggal_indonesia(iso_str):
     return f"{dt.day} {bulan[dt.month - 1]} {dt.year}"
 
 
-def _data_to_export_args(data, tanggal_disusun, tanggal_disetujui, tanggal_divalidasi, dosen_pengampu_tampil):
+def _data_to_export_args(data, tanggal_disusun, tanggal_disetujui, tanggal_divalidasi,
+                          dosen_pengampu_tampil, nama_kaprodi_kini, nama_bpm_kini):
     info_umum = dict(data.get("info_umum") or {})
     info_umum["tanggal_dokumen"] = tanggal_disusun
     info_umum["tanggal_disetujui"] = tanggal_disetujui
     info_umum["tanggal_divalidasi"] = tanggal_divalidasi
     info_umum["dosen_pengampu"] = dosen_pengampu_tampil
+    # Penyesuaian: nama_kaprodi/nama_biro_pjm yang TERSIMPAN di data ini
+    # "membeku" sejak RPS-nya pertama kali dibuat/diedit - kalau Admin
+    # menetapkan ulang siapa "pejabat resmi" (set_pejabat_utama) SETELAH RPS
+    # ini pernah dibuat, RPS lama tidak otomatis ikut update. Sama seperti
+    # Dosen Pengampu & tanggal-tanggal di atas, TIMPA dengan nilai TERKINI
+    # di sini (saat dokumen resminya diunduh) - supaya dokumen resmi yang
+    # dicetak SELALU mencerminkan pejabat yang berlaku sekarang, bukan
+    # pejabat yang berlaku waktu RPS ini pertama diisi.
+    if nama_kaprodi_kini:
+        info_umum["nama_kaprodi"] = nama_kaprodi_kini
+    if nama_bpm_kini:
+        info_umum["nama_biro_pjm"] = nama_bpm_kini
     return {
         "info_umum": info_umum,
         "cpmk_data": {int(k): v for k, v in (data.get("cpmk_data") or {}).items()},
@@ -140,9 +156,12 @@ def render_rps_tervalidasi(client, pengguna):
                 tanggal_disetujui = _format_tanggal_indonesia(row.get("diproses_pada")) or "-"
                 tanggal_divalidasi = _format_tanggal_indonesia(row.get("diproses_pada_bpm")) or "-"
                 dosen_pengampu_tampil = pengguna.get("nama") or pengguna.get("email")
+                nama_kaprodi_kini = get_kaprodi_nama(client, mk.get("prodi_id"))
+                nama_bpm_kini = get_bpm_nama(client)
                 export_args = _data_to_export_args(
                     row.get("data") or {}, tanggal_disusun, tanggal_disetujui,
                     tanggal_divalidasi, dosen_pengampu_tampil,
+                    nama_kaprodi_kini, nama_bpm_kini,
                 )
 
                 docx_buf = build_docx(

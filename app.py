@@ -42,7 +42,7 @@ from docx_export import BOBOT_KATEGORI
 from auth import require_login, get_client
 from db_master import (
     list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum,
-    get_kaprodi_nama, get_bpm_nama,
+    get_kaprodi_nama, get_bpm_nama, _clean_single_line_text,
 )
 from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
@@ -252,6 +252,44 @@ def default_pertemuan():
     return pertemuan
 
 
+def mk_key(suffix):
+    """Bikin widget key yang unik & stabil per Mata Kuliah aktif.
+
+    Kunci tetap SAMA selama MK yang sama masih dipilih (mencegah Streamlit
+    membuat ulang identitas widget setiap rerun -> penyebab gejala 'klik 2x'),
+    tapi otomatis BEDA saat pindah MK (mencegah nilai lama nyangkut/bocor)."""
+    return f"{st.session_state.mk_sel}__{suffix}"
+
+
+def sinkronkan_widget_pertemuan():
+    """WAJIB dipanggil setelah pertemuan_data diganti BORONGAN (impor Excel/
+    CSV di tab 16 Pertemuan, atau restore Cadangan Lokal) - SEBELUM
+    st.rerun(). Tanpa ini, minggu yang widget-nya SUDAH PERNAH dirender
+    sebelumnya (key sudah ada di session_state) TIDAK akan ikut ter-update
+    walau dict pertemuan_data-nya sendiri sudah benar - ini gotcha Streamlit:
+    argumen value/default yang baru diabaikan kalau widget dengan key yang
+    sama sudah pernah ada, widget tetap pakai isi session_state[key] miliknya
+    sendiri yang lama. Gejalanya persis seperti dilaporkan: sebagian minggu
+    (yang KEBETULAN belum pernah dirender - key masih baru) ter-update benar,
+    sisanya (yang sudah pernah dirender - key sudah lama ada) terlihat kosong/
+    tidak berubah padahal proses impornya sendiri sudah benar.
+
+    Pola yang dipakai di sini SAMA seperti yang sudah dipakai tombol
+    "Sarankan dengan AI" untuk satu minggu (lihat st.session_state[mk_key(...)]
+    = ... di bagian penerapan saran AI) - di sini diterapkan ke SEMUA 16
+    minggu sekaligus."""
+    for m in range(1, N_MINGGU + 1):
+        p = st.session_state.pertemuan_data[m]
+        st.session_state[mk_key(f"prt_cpmkref_{m}")] = p["cpmk_ref"] or "-"
+        st.session_state[mk_key(f"prt_sub_{m}")] = p["sub_cpmk_desc"]
+        st.session_state[mk_key(f"prt_bloom_{m}")] = p["bloom"]
+        st.session_state[mk_key(f"prt_materi_{m}")] = p["materi"]
+        st.session_state[mk_key(f"prt_metode_{m}")] = p["metode"]
+        st.session_state[mk_key(f"prt_bentuk_{m}")] = p["bentuk"]
+        st.session_state[mk_key(f"prt_bentuk_asesmen_{m}")] = p["bentuk_asesmen"]
+        st.session_state[mk_key(f"prt_indikator_{m}")] = p["indikator"]
+
+
 def init_state():
     defaults = {
         "prodi_sel": None,
@@ -266,8 +304,7 @@ def init_state():
             # untuk mengeditnya lagi.
             "dosen_koordinator": "", "dosen_pengampu": "", "deskripsi_mk": "",
             "rumpun_mk": "",
-            "nama_kaprodi": "", "nama_koordinator": "", "nama_penyusun": "",
-            "nama_biro_pjm": "", "tanggal_dokumen": "",
+            "nama_kaprodi": "", "nama_biro_pjm": "", "tanggal_dokumen": "",
             "level_ai": "", "deskripsi_ai": "",
         },
         "cpmk_data": {i: {"cpl_kode": None, "deskripsi": ""} for i in range(1, 6)},
@@ -314,28 +351,95 @@ def pertemuan_to_df(pertemuan_data):
     return pd.DataFrame(rows)
 
 
+def _teks_aman(value):
+    """Pastikan nilai jadi string yang aman untuk field teks bebas (Sub-CPMK,
+    Indikator, Bentuk Asesmen, Materi) - MENANGANI DUA kasus yang sebelumnya
+    lolos apa adanya dari Excel/CSV:
+    1. Sel kosong dibaca pandas sebagai NaN (tipe float) - NaN itu TRUTHY di
+       Python (beda dari None/string kosong), jadi pola umum `x or ""` TIDAK
+       menangkapnya dan NaN lolos apa adanya (persis bug yang sama dengan
+       kasus tampilan Koordinator sebelumnya, di file berbeda).
+    2. Isian yang KEBETULAN murni angka (mis. Sub-CPMK diisi cuma "123")
+       dibaca pandas sebagai int/float, bukan teks.
+    Kalau tidak ditangani, nilai bukan-string ini lolos ke session_state
+    lalu CRASH (TypeError: 'float' object is not subscriptable) begitu
+    dipotong buat pratinjau label expander (preview[:60])."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value).strip()
+
+
+def _normalisasi_multi(raw_value, opsi_valid, label, minggu, daftar_peringatan):
+    """Pisah nilai yang diimpor (dipisah koma) dan cocokkan ke opsi yang sah
+    (BLOOM_LEVELS/METODE_OPTIONS/BENTUK_OPTIONS) - TIDAK case-sensitive dan
+    mengabaikan spasi berlebih, supaya salah ketik kecil (mis. "sgd" atau
+    " SGD ") tetap terbaca. Nilai yang SAMA SEKALI tidak dikenali (typo besar,
+    atau kolom diisi teks bebas alih-alih kode) dibuang - bukan disimpan apa
+    adanya - dan dicatat ke daftar_peringatan supaya pengguna tahu ada yang
+    diabaikan, bukan cuma hilang diam-diam.
+
+    Ini penting karena field ini dipakai sebagai `default=` di st.multiselect
+    (lihat tab 16 Pertemuan) - Streamlit MEWAJIBKAN setiap nilai di `default`
+    persis ada di daftar opsinya, kalau tidak seluruh halaman crash
+    (StreamlitAPIException) begitu minggu itu dirender, dan baru bisa
+    normal lagi setelah data yang salah itu dibersihkan manual dari
+    database/session - servernya sendiri tidak menolak impornya di awal,
+    jadi gejalanya BARU muncul belakangan dan terasa seperti "macet"."""
+    if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+        return []
+    result = []
+    peta_upper = {opt.upper(): opt for opt in opsi_valid}
+    for x in str(raw_value).split(","):
+        bersih = x.strip()
+        if not bersih:
+            continue
+        cocok = peta_upper.get(bersih.upper())
+        if cocok:
+            if cocok not in result:
+                result.append(cocok)
+        else:
+            daftar_peringatan.append(f"Minggu {minggu} - {label}: \u201c{bersih}\u201d tidak dikenali, diabaikan")
+    return result
+
+
 def df_to_pertemuan(df):
+    """Kembalikan (data, daftar_peringatan) - daftar_peringatan berisi baris
+    nilai mana saja yang diabaikan karena tidak cocok opsi yang sah (lihat
+    _normalisasi_multi), supaya pemanggil bisa menampilkannya ke pengguna."""
     data = {}
+    daftar_peringatan = []
+    cpmk_ref_valid = [f"CPMK-{i}" for i in range(1, 6)]
     for _, row in df.iterrows():
         if pd.isna(row["Minggu"]):
             continue  # lewati baris kosong (mis. sisa baris terpakai dari Excel)
         m = int(row["Minggu"])
-        cpmk_ref = row["CPMK Ref"]
+        cpmk_ref_raw = row["CPMK Ref"]
+        if pd.isna(cpmk_ref_raw) or cpmk_ref_raw in ("-", None, ""):
+            cpmk_ref = None
+        else:
+            cpmk_ref_bersih = str(cpmk_ref_raw).strip()
+            if cpmk_ref_bersih in cpmk_ref_valid:
+                cpmk_ref = cpmk_ref_bersih
+            else:
+                daftar_peringatan.append(
+                    f"Minggu {m} - CPMK Ref: \u201c{cpmk_ref_bersih}\u201d tidak dikenali, dikosongkan"
+                )
+                cpmk_ref = None
         data[m] = {
-            "sub_cpmk_desc": row["Sub-CPMK"] or "",
-            "cpmk_ref": None if cpmk_ref in ("-", None, "") else cpmk_ref,
-            "bloom": [x.strip() for x in str(row["Bloom"] or "").split(",") if x.strip()],
-            "indikator": row["Indikator"] or "",
-            "bentuk_asesmen": row["Bentuk Asesmen"] or "",
-            "metode": [x.strip() for x in str(row["Metode"] or "").split(",") if x.strip()],
-            "bentuk": [x.strip() for x in str(row["Bentuk Online"] or "").split(",") if x.strip()],
-            "materi": row["Materi"] or "",
+            "sub_cpmk_desc": _teks_aman(row["Sub-CPMK"]),
+            "cpmk_ref": cpmk_ref,
+            "bloom": _normalisasi_multi(row["Bloom"], BLOOM_LEVELS, "Bloom", m, daftar_peringatan),
+            "indikator": _teks_aman(row["Indikator"]),
+            "bentuk_asesmen": _teks_aman(row["Bentuk Asesmen"]),
+            "metode": _normalisasi_multi(row["Metode"], METODE_OPTIONS, "Metode", m, daftar_peringatan),
+            "bentuk": _normalisasi_multi(row["Bentuk Online"], BENTUK_OPTIONS, "Bentuk Online", m, daftar_peringatan),
+            "materi": _teks_aman(row["Materi"]),
         }
     # pastikan minggu 1-16 selalu ada meski file yang diimpor tidak lengkap
     for m in range(1, N_MINGGU + 1):
         if m not in data:
             data[m] = default_pertemuan()[m]
-    return data
+    return data, daftar_peringatan
 
 
 # --------------------------------------------------------------------------
@@ -344,13 +448,48 @@ def df_to_pertemuan(df):
 # sebagai mekanisme utama (Excel tetap ada sebagai cadangan opsional).
 # --------------------------------------------------------------------------
 def state_to_rps_data():
+    # Penyesuaian: bersihkan spasi berantakan (spasi ganda, spasi tak-putus/
+    # non-breaking space, baris kosong berulang) dari field teks panjang
+    # yang rawan ditempel dari Word/PDF - persis masalah yang sama dengan
+    # Deskripsi CPL, cuma di sisi Dosen (bukan Kaprodi). Dibersihkan di
+    # sini (saat SIMPAN), bukan langsung di widgetnya, supaya tidak
+    # mengganggu pengetikan yang sedang berlangsung.
+    #
+    # SENGAJA TIDAK diterapkan ke pertemuan_data (Sub-CPMK/Materi/Indikator
+    # tabel 16 Pertemuan) - dikecualikan dari pembersihan ini, konsisten
+    # dengan scripts/bersihkan_spasi_lama.py yang juga tidak menyentuh
+    # bagian itu untuk data lama.
+    #
+    # Pakai _clean_single_line_text (BUKAN _clean_long_text) untuk field
+    # di bawah ini - field-field ini seharusnya satu kalimat/paragraf utuh
+    # tanpa baris baru sama sekali, jadi baris baru yang ikut tertempel
+    # dari PDF (memecah satu kalimat jadi beberapa baris pendek) juga
+    # digabung jadi spasi, bukan cuma dirapikan spasinya saja.
+    info_umum_bersih = dict(st.session_state.info_umum)
+    if info_umum_bersih.get("deskripsi_mk"):
+        info_umum_bersih["deskripsi_mk"] = _clean_single_line_text(info_umum_bersih["deskripsi_mk"])
+
+    cpmk_bersih = {}
+    for k, v in st.session_state.cpmk_data.items():
+        v = dict(v)
+        if v.get("deskripsi"):
+            v["deskripsi"] = _clean_single_line_text(v["deskripsi"])
+        cpmk_bersih[str(k)] = v
+
+    referensi_bersih = []
+    for r in st.session_state.referensi_data:
+        r = dict(r)
+        if r.get("sitasi"):
+            r["sitasi"] = _clean_single_line_text(r["sitasi"])
+        referensi_bersih.append(r)
+
     return {
         "cpl_selected": st.session_state.cpl_selected,
-        "info_umum": st.session_state.info_umum,
-        "cpmk_data": {str(k): v for k, v in st.session_state.cpmk_data.items()},
+        "info_umum": info_umum_bersih,
+        "cpmk_data": cpmk_bersih,
         "pertemuan_data": {str(k): v for k, v in st.session_state.pertemuan_data.items()},
         "komponen_data": {str(k): v for k, v in st.session_state.komponen_data.items()},
-        "referensi_data": st.session_state.referensi_data,
+        "referensi_data": referensi_bersih,
     }
 
 
@@ -425,9 +564,9 @@ def simpan_progres_button(key_suffix, primary=False, label="💾 Simpan Progres 
             st.error(f"Gagal menyimpan: {e}")
 
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=30)
 def auto_save_fragment():
-    """Auto-save berkala (~60 detik) selagi Dosen mengisi RPS - lapisan
+    """Auto-save berkala (~30 detik) selagi Dosen mengisi RPS - lapisan
     TAMBAHAN di atas tombol Simpan manual (simpan_progres_button), supaya
     progres tidak hilang total kalau tidak sengaja refresh sebelum sempat
     klik Simpan sendiri.
@@ -435,7 +574,7 @@ def auto_save_fragment():
     CATATAN JUJUR: @st.fragment(run_every=...) adalah fitur BAWAAN Streamlit
     (bukan library pihak ketiga seperti komponen cookie yang pernah dicoba
     dan dibatalkan sebelumnya) - tapi belum pernah dipakai di proyek ini,
-    jadi tetap perlu diuji nyata: buka salah satu RPS, tunggu >=60 detik
+    jadi tetap perlu diuji nyata: buka salah satu RPS, tunggu >=30 detik
     sambil isi sesuatu, lihat apakah caption "Auto-save terakhir" di sidebar
     ikut berubah tanpa perlu klik apa pun. Butuh Streamlit >=1.37 (lihat
     requirements.txt) - kalau versi lebih lama, decorator ini akan error saat
@@ -490,9 +629,37 @@ def apply_rps_data_to_state(data):
     st.session_state.cpmk_data = cpmk
 
     pertemuan = default_pertemuan()
+    _abaikan_saat_muat = []
     for k, v in (data.get("pertemuan_data") or {}).items():
+        v = dict(v or {})
+        # Bersihkan lagi di sini (bukan cuma saat impor Excel) - kalau RPS ini
+        # sempat tersimpan SEBELUM validasi impor ditambahkan, nilai yang
+        # tidak dikenali di kolom ini bisa saja sudah kadung tersimpan di
+        # database, dan tanpa pembersihan ulang di sini akan tetap membuat
+        # st.multiselect crash setiap kali RPS ini dibuka (lihat
+        # _normalisasi_multi/df_to_pertemuan untuk penjelasan lengkap).
+        v["bloom"] = _normalisasi_multi(", ".join(v.get("bloom") or []), BLOOM_LEVELS, "Bloom", k, _abaikan_saat_muat)
+        v["metode"] = _normalisasi_multi(", ".join(v.get("metode") or []), METODE_OPTIONS, "Metode", k, _abaikan_saat_muat)
+        v["bentuk"] = _normalisasi_multi(", ".join(v.get("bentuk") or []), BENTUK_OPTIONS, "Bentuk Online", k, _abaikan_saat_muat)
+        # Sama seperti bloom/metode/bentuk di atas - pastikan field teks
+        # bebas ini juga tetap string (bukan angka/NaN yang mungkin sempat
+        # kesimpan sebelum _teks_aman ada), supaya tidak crash saat dipotong
+        # untuk pratinjau label expander (lihat preview[:60] di tab
+        # "16 Pertemuan").
+        for field in ("sub_cpmk_desc", "indikator", "bentuk_asesmen", "materi"):
+            v[field] = _teks_aman(v.get(field))
         pertemuan[int(k)] = v
     st.session_state.pertemuan_data = pertemuan
+    # Sama seperti setelah impor Excel/CSV borongan - widget per-minggu yang
+    # SUDAH PERNAH dirender sebelumnya (mis. Dosen sempat pindah ke MK lain
+    # lalu balik lagi ke MK ini dalam sesi yang sama) tidak akan ikut
+    # menampilkan data yang baru dimuat ini tanpa disinkronkan manual.
+    sinkronkan_widget_pertemuan()
+    if _abaikan_saat_muat:
+        st.session_state["_peringatan_import_pertemuan"] = [
+            p.replace("tidak dikenali, diabaikan", "tersimpan tidak valid dari sebelumnya, sudah dibersihkan otomatis")
+            for p in _abaikan_saat_muat
+        ]
 
     komponen = {i: {kat: 0 for kat in KATEGORI_PENILAIAN} for i in range(1, 6)}
     for k, v in (data.get("komponen_data") or {}).items():
@@ -516,7 +683,7 @@ def serialize_progress_excel(mk_row):
     ws_meta.append(["mk_sel", st.session_state.mk_sel])
     info = st.session_state.info_umum
     for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
-                "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
+                "rumpun_mk", "nama_kaprodi",
                 "nama_biro_pjm", "tanggal_dokumen", "level_ai", "deskripsi_ai"):
         ws_meta.append([key, info.get(key, "")])
 
@@ -566,7 +733,7 @@ def load_progress_excel(uploaded_file):
         # yang belum ada di file progres lama (mis. ditambahkan di versi aplikasi yang lebih
         # baru) tidak sampai hilang dan menyebabkan KeyError di tempat lain.
         for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
-                    "rumpun_mk", "nama_kaprodi", "nama_koordinator", "nama_penyusun",
+                    "rumpun_mk", "nama_kaprodi",
                     "nama_biro_pjm", "tanggal_dokumen", "level_ai", "deskripsi_ai"):
             st.session_state.info_umum[key] = meta.get(key) or st.session_state.info_umum.get(key, "")
 
@@ -609,7 +776,10 @@ def load_progress_excel(uploaded_file):
         if values:
             cols = values[0]
             df = pd.DataFrame(values[1:], columns=cols)
-            st.session_state.pertemuan_data = df_to_pertemuan(df)
+            st.session_state.pertemuan_data, peringatan_pertemuan = df_to_pertemuan(df)
+            sinkronkan_widget_pertemuan()
+            if peringatan_pertemuan:
+                st.session_state["_peringatan_import_pertemuan"] = peringatan_pertemuan
 
 
 
@@ -620,6 +790,19 @@ init_state()
 
 st.title("📘 RPS Builder")
 st.caption("Universitas Siber Asia")
+pesan_pasca_login = st.session_state.pop("_pesan_pasca_login", None)
+if pesan_pasca_login:
+    st.success(pesan_pasca_login)
+
+# Penyesuaian: begitu masuk pertama kali di satu sesi browser, langsung
+# tampilkan "RPS Saya" (ringkasan status semua Mata Kuliah yang diampu)
+# alih-alih "Isi RPS" - lebih masuk akal sebagai halaman awal karena Dosen
+# biasanya mau cek status dulu sebelum memutuskan mana yang mau diisi/dibuka.
+# HARUS pakai "not in" (bukan .get(..., default)) supaya pilihan menu Dosen
+# di sesi yang SAMA (state sudah ada) tidak pernah ditimpa balik ke sini -
+# ini murni nilai AWAL sekali saat sesi baru mulai.
+if "menu_utama" not in st.session_state:
+    st.session_state["menu_utama"] = "📋 RPS Saya"
 
 # Penyesuaian: menu dasar sama untuk semua orang (Isi RPS, RPS Saya, RPS
 # Disetujui - RPS tetap milik Mata Kuliah/koordinatornya, bukan tergantung
@@ -761,7 +944,10 @@ with st.sidebar:
         # kalau itu juga tidak ada.
         nama_saya = pengguna.get("nama") or pengguna.get("email") or ""
         st.session_state.info_umum["dosen_koordinator"] = nama_saya
-        st.session_state.info_umum["nama_koordinator"] = nama_saya
+        # (nama_koordinator - field duplikat identik dengan dosen_koordinator
+        # di atas, sisa dari pdf_export.py lama yang sudah tidak dipakai -
+        # dihapus, supaya tidak ada dua field yang harus selalu disamakan
+        # manual dan berisiko suatu saat kepleset beda nilai)
 
         pejabat_cfg = load_pejabat_config()
         nama_kaprodi_db = get_kaprodi_nama(client, prodi_id)
@@ -799,6 +985,9 @@ with st.sidebar:
 
     st.divider()
     st.subheader("💾 Simpan RPS")
+    pesan_sidebar_pending = st.session_state.pop("_pesan_sidebar_rps", None)
+    if pesan_sidebar_pending:
+        st.success(pesan_sidebar_pending)
     status_saat_ini = st.session_state.get("_rps_status") or "draft"
     status_label = {
         "draft": "📝 Draft", "diajukan": "📤 Diajukan (menunggu Kaprodi)",
@@ -822,6 +1011,17 @@ with st.sidebar:
             st.warning(f"**Catatan BPM (ditolak):** {st.session_state['_rps_catatan_bpm']}")
         elif st.session_state.get("_rps_catatan"):
             st.warning(f"**Catatan Kaprodi (ditolak):** {st.session_state['_rps_catatan']}")
+    # Penyesuaian: RPS yang tadinya SUDAH FINAL (divalidasi) tapi dibuka
+    # kembali Kaprodi untuk direvisi (lihat buka_kembali_rps() di
+    # sql/schema.sql & tab "Buka Kembali RPS Final" di Panel Kaprodi) juga
+    # balik ke status 'draft' - bedakan tampilannya dari draft yang memang
+    # belum pernah diajukan sama sekali, supaya Dosen paham ini revisi dari
+    # dokumen yang sudah pernah final, bukan isian baru dari nol.
+    elif status_saat_ini == "draft" and st.session_state.get("_rps_catatan"):
+        st.info(
+            f"🔓 **RPS ini dibuka kembali oleh Kaprodi untuk direvisi** - isinya "
+            f"tetap seperti versi final terakhir. Catatan: {st.session_state['_rps_catatan']}"
+        )
 
     if bisa_edit:
         simpan_progres_button("sidebar", primary=True, label="💾 Simpan ke Database")
@@ -840,12 +1040,15 @@ with st.sidebar:
                     tarik_pengajuan_rps(client, st.session_state["_rps_id"])
                     st.session_state["_rps_status"] = "draft"
                     st.session_state["_rps_diajukan_pada"] = None
-                    st.success("Pengajuan ditarik, kembali ke status Draft dan bisa diedit lagi.")
+                    st.session_state["_pesan_sidebar_rps"] = "Pengajuan ditarik, kembali ke status Draft dan bisa diedit lagi."
                     st.rerun()
                 except Exception as e:
                     st.error(f"Gagal menarik pengajuan: {e}")
 
     with st.expander("📦 Cadangan lokal (opsional, format Excel)"):
+        pesan_cadangan = st.session_state.pop("_pesan_cadangan_lokal", None)
+        if pesan_cadangan:
+            st.success(pesan_cadangan)
         st.caption(
             "Simpan ke Database di atas sudah jadi penyimpanan utama - bagian "
             "ini murni opsional untuk cadangan pribadi, atau mengimpor progres "
@@ -864,7 +1067,9 @@ with st.sidebar:
                 try:
                     load_progress_excel(up)
                     st.session_state["_last_loaded_progress_file"] = file_fingerprint
-                    st.success("Progres dimuat. Jangan lupa klik 'Simpan ke Database' di atas untuk menyimpannya permanen.")
+                    st.session_state["_pesan_cadangan_lokal"] = (
+                        "Progres dimuat. Jangan lupa klik 'Simpan ke Database' di atas untuk menyimpannya permanen."
+                    )
                     st.rerun()
                 except Exception as e:
                     st.error(f"Gagal memuat progres: {type(e).__name__}: {e}")
@@ -913,26 +1118,25 @@ with st.sidebar:
                 "menyediakan API key bersama sebagai opsi tambahan bagi semua Dosen."
             )
 
-# Opsi B: auto-save berkala (~60 detik) - dipanggil di SINI (bukan di dalam
+# Opsi B: auto-save berkala (~30 detik) - dipanggil di SINI (bukan di dalam
 # "with st.sidebar:" di atas) karena tidak perlu render UI apa pun sendiri,
 # murni tugas latar belakang. Ditaruh setelah blok sidebar selesai supaya
 # mk_row (dibutuhkan fungsinya) sudah pasti ada.
 auto_save_fragment()
 
 
-def mk_key(suffix):
-    """Bikin widget key yang unik & stabil per Mata Kuliah aktif.
-
-    Kunci tetap SAMA selama MK yang sama masih dipilih (mencegah Streamlit
-    membuat ulang identitas widget setiap rerun -> penyebab gejala 'klik 2x'),
-    tapi otomatis BEDA saat pindah MK (mencegah nilai lama nyangkut/bocor)."""
-    return f"{st.session_state.mk_sel}__{suffix}"
-
+st.markdown(
+    f"### \U0001F4D6 {mk_row['Nama Mata Kuliah']} ({mk_row['Kode MK']})"
+)
+st.caption(
+    f"{prodi_sel} \u00B7 Kurikulum {tahun_sel} \u00B7 SKS {mk_row['SKS']} \u00B7 "
+    f"Semester {mk_row['Semester']} \u00B7 Status: "
+    f"{status_label.get(status_saat_ini, status_saat_ini)}"
+)
 
 tab_info, tab_cpl, tab_pertemuan, tab_ref, tab_nilai, tab_export = st.tabs(
     ["Info Umum", "CPL & CPMK", "16 Pertemuan", "Daftar Pustaka", "Komponen Penilaian", "Preview dan Ajukan"]
 )
-
 # --- Tab: Info Umum ---
 with tab_info:
     simpan_progres_button("info_umum")
@@ -969,9 +1173,9 @@ with tab_info:
         st.caption("⚠️ Belum ada akun Kaprodi terdaftar untuk Prodi ini - hubungi Admin.")
 
     st.divider()
-    st.subheader("Ka. Biro Penjaminan Mutu (BPM)")
+    st.subheader("Ka. Badan Penjaminan Mutu (BPM)")
     st.text_input(
-        "Nama Ka. Biro Penjaminan Mutu", info["nama_biro_pjm"], disabled=True, key=mk_key("nama_biro_pjm_display"),
+        "Nama Ka. Badan Penjaminan Mutu", info["nama_biro_pjm"], disabled=True, key=mk_key("nama_biro_pjm_display"),
         help="Otomatis diisi dari akun yang terdaftar sebagai BPM. Muncul di QR BPM pada dokumen.",
     )
     if not info["nama_biro_pjm"]:
@@ -1028,12 +1232,26 @@ with tab_pertemuan:
     st.divider()
     st.subheader("Rincian 16 Pertemuan")
 
+    pesan_sukses_pertemuan = st.session_state.pop("_pesan_sukses_pertemuan", None)
+    if pesan_sukses_pertemuan:
+        st.success(pesan_sukses_pertemuan)
+    peringatan_pending = st.session_state.pop("_peringatan_import_pertemuan", None)
+    if peringatan_pending:
+        st.warning(
+            "Impor berhasil, tapi ada beberapa nilai yang tidak dikenali (bukan salah satu "
+            "kode yang sah) sehingga diabaikan/dikosongkan - cek dan isi ulang manual kalau "
+            "perlu:\n\n" + "\n".join(f"- {p}" for p in peringatan_pending)
+        )
+
     with st.expander("📥 Impor dari Tabel (opsional): isi banyak minggu sekaligus"):
         st.caption(
             "Unduh templatnya, isi di Excel (lebih leluasa untuk isi banyak baris sekaligus), "
             "lalu unggah kembali untuk mengisi otomatis ke-16 pertemuan. Kolom **CPMK Ref** diisi "
             "'CPMK-1' s/d 'CPMK-5' (atau '-' untuk UTS/UAS); kolom Bloom/Metode/Bentuk Online "
-            "dipisah koma kalau lebih dari satu."
+            "dipisah koma kalau lebih dari satu - **harus persis salah satu kode yang sah** "
+            f"(Bloom: {', '.join(BLOOM_LEVELS)} · Metode: {', '.join(METODE_OPTIONS)} · "
+            f"Bentuk Online: {', '.join(BENTUK_OPTIONS)}), besar-kecil huruf bebas tapi ejaannya "
+            "harus sama - nilai lain akan diabaikan otomatis (bukan error, tapi juga tidak tersimpan)."
         )
         template_buf = io.BytesIO()
         pertemuan_to_df(default_pertemuan()).to_excel(template_buf, index=False)
@@ -1047,13 +1265,29 @@ with tab_pertemuan:
         )
         upfile = c2.file_uploader("Unggah Tabel Terisi", type=["xlsx", "csv"], key=mk_key("pertemuan_import"))
         if upfile is not None:
-            try:
-                imported_df = pd.read_csv(upfile) if upfile.name.endswith(".csv") else pd.read_excel(upfile)
-                st.session_state.pertemuan_data = df_to_pertemuan(imported_df)
-                st.success("Berhasil mengimpor data 16 pertemuan.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Gagal mengimpor: {e}")
+            # Penanda "sudah diproses" (fingerprint nama+ukuran file) - TANPA
+            # ini, file yang sama akan terus terbaca ulang di SETIAP rerun
+            # (st.file_uploader mempertahankan file yang diunggah di widget-
+            # nya sampai pengguna menghapusnya sendiri, bukan cuma sekali
+            # pakai) - digabung dengan st.rerun() di bawah, ini menciptakan
+            # PERULANGAN TANPA HENTI (impor -> rerun -> file masih ada -> impor
+            # lagi -> rerun lagi -> ...), persis gejala halaman "berkelap-kelip
+            # terus-menerus" yang dilaporkan. Pola sama seperti pemeriksaan
+            # _last_loaded_progress_file di bagian Cadangan Lokal, sengaja
+            # dibuat mirip persis.
+            pertemuan_fingerprint = f"{upfile.name}_{upfile.size}"
+            if st.session_state.get("_last_loaded_pertemuan_file") != pertemuan_fingerprint:
+                try:
+                    imported_df = pd.read_csv(upfile) if upfile.name.endswith(".csv") else pd.read_excel(upfile)
+                    st.session_state.pertemuan_data, peringatan_import = df_to_pertemuan(imported_df)
+                    sinkronkan_widget_pertemuan()
+                    st.session_state["_last_loaded_pertemuan_file"] = pertemuan_fingerprint
+                    if peringatan_import:
+                        st.session_state["_peringatan_import_pertemuan"] = peringatan_import
+                    st.session_state["_pesan_sukses_pertemuan"] = "Berhasil mengimpor data 16 pertemuan."
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal mengimpor: {e}")
 
     st.caption(
         "Sub-CPMK diisi langsung per minggu, sertakan CPMK mana yang dirujuk lewat **CPMK Ref** "
@@ -1064,7 +1298,7 @@ with tab_pertemuan:
         p = st.session_state.pertemuan_data[m]
         is_ujian = m in (8, 16)
         label = f"Minggu {m}" + (" 🔴 UTS" if m == 8 else " 🔴 UAS" if m == 16 else "")
-        preview = p["sub_cpmk_desc"] or p["materi"] or "belum diisi"
+        preview = _teks_aman(p["sub_cpmk_desc"]) or _teks_aman(p["materi"]) or "belum diisi"
         with st.expander(f"{label}: {preview[:60]}{'…' if len(preview) > 60 else ''}"):
             if is_ujian:
                 st.warning(
@@ -1260,6 +1494,9 @@ with tab_nilai:
 
 # --- Tab: Preview dan Ajukan ---
 with tab_export:
+    pesan_sukses_ajukan = st.session_state.pop("_pesan_sukses_ajukan", None)
+    if pesan_sukses_ajukan:
+        st.success(pesan_sukses_ajukan)
     st.subheader("Preview")
     ready = len(st.session_state.cpl_selected) == N_CPL_WAJIB
     if not ready:
@@ -1318,7 +1555,7 @@ with tab_export:
                             st.session_state["_rps_catatan_bpm"] = None
                             st.session_state["_rps_diajukan_pada"] = datetime.now().isoformat()
                             st.session_state["_confirm_ajukan"] = False
-                            st.success("RPS diajukan ke Kaprodi untuk direview.")
+                            st.session_state["_pesan_sukses_ajukan"] = "RPS diajukan ke Kaprodi untuk direview."
                             st.rerun()
                         except Exception as e:
                             st.error(f"Gagal mengajukan: {e}")

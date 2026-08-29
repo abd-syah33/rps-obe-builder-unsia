@@ -231,7 +231,7 @@ def _login_form():
                     })
                     client.auth.update_user({"password": password_baru})
                     _store_session(auth_resp.session)
-                    st.success("Password berhasil diubah. Anda otomatis masuk.")
+                    st.session_state["_pesan_pasca_login"] = "Password berhasil diubah. Anda otomatis masuk."
                     st.rerun()
                 except Exception as e:
                     st.error(f"Gagal reset password: {e} (kemungkinan kode salah/kedaluwarsa, atau email tidak cocok)")
@@ -284,13 +284,16 @@ def require_login():
         st.caption(f"👤 {nama_tampil} · peran: **{pengguna['role']}**")
 
         with st.expander("✏️ Ubah Nama"):
+            pesan_ubah_nama = st.session_state.pop("_pesan_ubah_nama", None)
+            if pesan_ubah_nama:
+                st.success(pesan_ubah_nama)
             nama_baru = st.text_input(
                 "Nama Lengkap", value=pengguna.get("nama") or "", key="nama_saya_input",
             )
             if st.button("Simpan Nama", key="simpan_nama_btn"):
                 try:
                     client.rpc("update_nama_saya", {"nama_baru": nama_baru.strip()}).execute()
-                    st.success("Nama berhasil diperbarui.")
+                    st.session_state["_pesan_ubah_nama"] = "Nama berhasil diperbarui."
                     st.rerun()
                 except Exception as e:
                     st.error(f"Gagal memperbarui nama: {e}")

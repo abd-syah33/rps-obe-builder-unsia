@@ -18,7 +18,7 @@ import tempfile
 from copy import deepcopy
 
 from docx import Document
-from docx.shared import Cm
+from docx.shared import Cm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -114,6 +114,30 @@ def set_paragraph_text(p, text):
         if existing_rpr is not None:
             r_el.remove(existing_rpr)
         r_el.insert(0, mark_rpr)
+
+    # Penyesuaian: paksa "spasi sesudah paragraf" jadi 0 secara eksplisit -
+    # template ini (seperti kebanyakan dokumen Word) punya default DOKUMEN
+    # (docDefaults di styles.xml, bukan setting per-paragraf yang kelihatan
+    # di Word) yang menambah ~10pt spasi SESUDAH tiap paragraf. Ini BEDA
+    # dari "line spacing" (jarak ANTAR BARIS di dalam satu paragraf, yang
+    # diatur lewat Ctrl+1/Ctrl+2 di Word) - mengubah line spacing ke 1 TIDAK
+    # menghilangkan 10pt ini, karena keduanya properti terpisah
+    # (w:spacing/@line vs w:spacing/@after). Efeknya kecil per baris, tapi
+    # terakumulasi di tabel 16 Pertemuan (16 baris x beberapa sel) jadi
+    # terlihat jelas bikin tabel kepanjangan. Baris bertingkat (mis. sel QR
+    # nama di bawah gambar) tetap aman - 0pt cuma menghapus tambahan
+    # kosong, bukan mengubah tinggi teks itu sendiri.
+    #
+    # SEKALIAN paksa line spacing jadi seragam (single/1.0) - ternyata
+    # template ASLI-nya sendiri tidak konsisten antar baris minggu (ada yang
+    # tidak diatur sama sekali/ikut default dokumen 1.15, ada yang 1.5) -
+    # jadi mengatur ulang line spacing MANUAL di template Word tidak cukup,
+    # karena tiap baris punya pengaturannya sendiri-sendiri yang harus
+    # diubah satu-satu. Diseragamkan di sini supaya konsisten otomatis
+    # untuk SEMUA baris, tidak bergantung isi template.
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.line_spacing = 1.0
 
 
 def set_cell_text(cell, text):
@@ -246,7 +270,7 @@ def fill_info_table(document, prodi, mk_row, cpl_df, info_umum, cpmk_data,
     )
     fill_qr_cell(
         r3[7], "divalidasi", kode_mk, nama_mk,
-        info_umum.get("nama_biro_pjm"), "Ka. Biro Penjaminan Mutu", tgl_divalidasi,
+        info_umum.get("nama_biro_pjm"), "Ka. Badan Penjaminan Mutu", tgl_divalidasi,
     )
 
     # --- CPL (baris 11-15) ---

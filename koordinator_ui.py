@@ -18,6 +18,9 @@ BELUM_DITETAPKAN = "(belum ditetapkan)"
 
 
 def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
+    pesan_koor = st.session_state.pop(f"_pesan_koor_{prodi_id}_{tahun_kurikulum}", None)
+    if pesan_koor:
+        st.success(pesan_koor)
     st.caption(
         "Tetapkan satu Dosen sebagai koordinator per Mata Kuliah - HANYA Dosen yang "
         "ditetapkan di sini yang bisa mengisi RPS untuk Mata Kuliah tsb. Mata Kuliah "
@@ -75,7 +78,7 @@ def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
                             set_koordinator_mk(client, mk["id"], koordinator_nip=nip_by_label[pilihan])
                         else:
                             set_koordinator_mk(client, mk["id"])
-                        st.success("Koordinator diperbarui.")
+                        st.session_state[f"_pesan_koor_{prodi_id}_{tahun_kurikulum}"] = "Koordinator diperbarui."
                         load_master_db.clear()
                         st.rerun()
                     except Exception as e:

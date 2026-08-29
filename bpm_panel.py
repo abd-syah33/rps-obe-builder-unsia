@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Panel BPM (Biro Penjaminan Mutu) - validasi TAHAP KEDUA setelah Kaprodi
+"""Panel BPM (Badan Penjaminan Mutu) - validasi TAHAP KEDUA setelah Kaprodi
 menyetujui (status 'disetujui' -> 'divalidasi'). Cakupan SE-INSTITUSI (semua
 Prodi, tidak dibatasi seperti Kaprodi) - lihat policy RLS "bpm baca rps
 antrian & riwayat" di sql/schema.sql.
@@ -10,7 +10,9 @@ lagi dari awal (lihat catatan di ajukan_rps() pada sql/schema.sql)."""
 
 import streamlit as st
 
+from db_master import load_master_db
 from rps_store import list_bpm_queue, validasi_bpm_rps, tolak_bpm_rps
+from rps_preview import render_rps_preview
 
 
 def render_bpm_panel(client, pengguna):
@@ -20,6 +22,9 @@ def render_bpm_panel(client, pengguna):
         "RPS baru muncul di menu \"RPS Tervalidasi\" (bisa dilihat semua Dosen) "
         "setelah lolos validasi di sini."
     )
+    pesan_bpm = st.session_state.pop("_pesan_bpm", None)
+    if pesan_bpm:
+        st.success(pesan_bpm)
 
     rows = list_bpm_queue(client)
     if not rows:
@@ -33,7 +38,7 @@ def render_bpm_panel(client, pengguna):
         mk = row.get("mata_kuliah") or {}
         prodi = mk.get("prodi") or {}
         info_umum = (row.get("data") or {}).get("info_umum") or {}
-        nama_dosen = info_umum.get("dosen_koordinator") or info_umum.get("nama_koordinator") or "-"
+        nama_dosen = info_umum.get("dosen_koordinator") or "-"
         entri.append({
             "row": row, "mk": mk, "prodi": prodi, "nama_dosen": nama_dosen,
             "nama_mk": mk.get("nama_mk", "-"), "kode_mk": mk.get("kode_mk", "-"),
@@ -94,12 +99,15 @@ def render_bpm_panel(client, pengguna):
                 "Catatan (wajib diisi kalau menolak, opsional kalau memvalidasi)",
                 key=f"catatan_bpm_{row['id']}", height=70,
             )
+            with st.expander("\U0001F441\uFE0F Lihat Detail Pengisian RPS"):
+                _, cpl_df = load_master_db(client, mk.get("prodi_id"), mk.get("tahun_kurikulum"))
+                render_rps_preview(row.get("data"), cpl_df)
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Validasi", key=f"validasi_{row['id']}", use_container_width=True, type="primary"):
                     try:
                         validasi_bpm_rps(client, row["id"], catatan.strip() or None)
-                        st.success("RPS divalidasi - sekarang final dan muncul di RPS Tervalidasi.")
+                        st.session_state["_pesan_bpm"] = "RPS divalidasi - sekarang final dan muncul di RPS Tervalidasi."
                         list_bpm_queue.clear()
                         st.rerun()
                     except Exception as e:
@@ -111,7 +119,7 @@ def render_bpm_panel(client, pengguna):
                     else:
                         try:
                             tolak_bpm_rps(client, row["id"], catatan.strip())
-                            st.success("RPS ditolak, langsung kembali ke Dosen untuk direvisi.")
+                            st.session_state["_pesan_bpm"] = "RPS ditolak, langsung kembali ke Dosen untuk direvisi."
                             list_bpm_queue.clear()
                             st.rerun()
                         except Exception as e:

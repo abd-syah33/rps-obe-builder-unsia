@@ -110,7 +110,7 @@ def list_diajukan(_client):
     tabel pengguna - lebih sederhana & tidak perlu izin baca lintas-akun."""
     resp = (
         _client.table("rps")
-        .select("id, status, updated_at, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi(nama))")
+        .select("id, status, updated_at, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi_id, prodi(nama))")
         .eq("status", "diajukan")
         .order("updated_at")
         .execute()
@@ -157,7 +157,7 @@ def list_bpm_queue(_client):
     & riwayat"), TANPA filter Prodi (BPM se-institusi)."""
     resp = (
         _client.table("rps")
-        .select("id, status, updated_at, diproses_pada, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi(nama))")
+        .select("id, status, updated_at, diproses_pada, data, mata_kuliah(nama_mk, kode_mk, tahun_kurikulum, prodi_id, prodi(nama))")
         .eq("status", "disetujui")
         .order("diproses_pada")
         .execute()
@@ -171,3 +171,26 @@ def validasi_bpm_rps(client, rps_id, catatan=None):
 
 def tolak_bpm_rps(client, rps_id, catatan):
     client.rpc("tolak_bpm_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
+
+
+def list_divalidasi_by_prodi(client, prodi_id):
+    """RPS berstatus 'divalidasi' KHUSUS untuk satu Prodi - dipakai Kaprodi
+    di panelnya sendiri untuk skenario "buka kembali untuk revisi" (beda
+    dari list_divalidasi() di atas yang untuk halaman "RPS Tervalidasi"
+    lintas-Prodi buat semua Dosen)."""
+    resp = (
+        client.table("rps")
+        .select("id, status, diproses_pada_bpm, data, mata_kuliah!inner(nama_mk, kode_mk, tahun_kurikulum, prodi_id)")
+        .eq("status", "divalidasi")
+        .eq("mata_kuliah.prodi_id", prodi_id)
+        .order("diproses_pada_bpm", desc=True)
+        .execute()
+    )
+    return resp.data or []
+
+
+def buka_kembali_rps(client, rps_id, catatan=None):
+    """Kembalikan RPS yang sudah divalidasi ke status draft untuk direvisi -
+    lihat buka_kembali_rps() di sql/schema.sql untuk aturan wewenang &
+    field apa saja yang ikut dikosongkan."""
+    client.rpc("buka_kembali_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()

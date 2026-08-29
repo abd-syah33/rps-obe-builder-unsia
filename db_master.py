@@ -14,6 +14,8 @@ tidak perlu diubah sama sekali.
 
 import re
 
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -142,6 +144,53 @@ def _clean_str(value):
     return str(value).strip()
 
 
+def _clean_long_text(value):
+    """Bersihkan teks panjang yang sering ditempel dari Word/PDF (mis.
+    Deskripsi CPL) dari spasi berantakan - BUKAN cuma strip() ujungnya
+    (yang cuma bersihkan spasi di awal/akhir, bukan yang di tengah):
+    - Spasi tak-putus (non-breaking space \\xa0) & varian spasi unicode lain
+      (sering ikut kepaste dari Word/PDF, terlihat sama seperti spasi biasa
+      tapi bikin pencarian/penataan teks jadi aneh) - diseragamkan jadi
+      spasi biasa.
+    - Spasi/tab berulang di tengah kalimat - dirapikan jadi satu spasi.
+    - Baris kosong berulang (lebih dari satu) - dirapikan jadi maksimal
+      satu baris kosong, dan spasi nempel di awal/akhir tiap baris dibuang.
+
+    MEMPERTAHANKAN baris baru tunggal (dianggap paragraf yang disengaja) -
+    untuk field yang seharusnya SATU kalimat utuh tanpa baris baru sama
+    sekali (Deskripsi CPL/CPMK/MK, Referensi), pakai _clean_single_line_text
+    di bawah, bukan fungsi ini.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value)
+    text = re.sub(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000]", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _clean_single_line_text(value):
+    """Sama seperti _clean_long_text, TAPI baris baru di dalam teks JUGA
+    digabung jadi satu spasi - dipakai KHUSUS untuk field yang memang
+    seharusnya SATU kalimat/paragraf utuh tanpa baris baru sama sekali
+    (Deskripsi CPL, Deskripsi CPMK, Deskripsi Mata Kuliah, Referensi).
+
+    Kasus yang ditangani: teks yang ditempel dari PDF sering ikut membawa
+    baris baru di SETIAP baris hasil word-wrap PDF aslinya (bukan baris
+    baru yang disengaja penulisnya) - satu kalimat utuh jadi terpecah jadi
+    beberapa baris pendek di tengah kalimat. _clean_long_text SENGAJA tidak
+    menangani ini karena field lain (mis. Materi Pembelajaran di tabel 16
+    Pertemuan) memang boleh berisi beberapa baris/poin terpisah - jangan
+    pakai fungsi ini untuk field semacam itu.
+    """
+    text = _clean_long_text(value)
+    text = re.sub(r"\s*\n\s*", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
 def _clean_int(value):
     if value is None or (isinstance(value, float) and pd.isna(value)) or value == "":
         return None
@@ -158,20 +207,24 @@ def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df, original_d
 
     Penyesuaian: baris yang ADA di original_df (state SEBELUM diedit) tapi
     SUDAH TIDAK ADA lagi di edited_df (dihapus lewat tombol hapus baris di
-    data_editor) sekarang BENAR-BENAR dihapus dari database - sebelumnya
-    dilewati diam-diam (baris itu muncul lagi setelah reload, membingungkan).
-    Aman karena kolom rps.mata_kuliah_id punya "on delete restrict" - Postgres
-    sendiri akan MENOLAK (bukan diam-diam gagal) kalau Mata Kuliah itu sudah
-    dipakai di RPS manapun; error itu ditangkap di sini dan nama Kode MK-nya
-    dikembalikan lewat `gagal_hapus` supaya pemanggil bisa kasih tahu Admin.
+    data_editor) sekarang BENAR-BENAR dihapus dari database lewat RPC
+    hapus_mata_kuliah_aman() - sebelumnya dilewati diam-diam (baris itu
+    muncul lagi setelah reload, membingungkan). RPC ini membedakan RPS
+    berstatus draft (ikut terhapus otomatis, karena belum pernah dilihat
+    siapa pun selain koordinatornya sendiri) dari RPS yang sudah
+    diajukan/disetujui/divalidasi/ditolak (MENOLAK penghapusan MK-nya,
+    supaya jejak resmi tidak hilang) - error penolakan itu ditangkap di sini
+    dan nama Kode MK-nya dikembalikan lewat `gagal_hapus` supaya pemanggil
+    bisa kasih tahu Admin/Kaprodi.
 
     Efek samping dari logika di atas: KALAU Kode MK diubah di editor (bukan
     dihapus), kode LAMA-nya kini otomatis ikut coba dihapus (karena sudah
     tidak ada di edited_df) - kalau kode lama itu TERNYATA belum dipakai di
-    RPS manapun, hasilnya baris lama betulan hilang (diganti baris baru,
-    bukan lagi menyisakan duplikat seperti sebelumnya); kalau SUDAH dipakai,
-    penghapusannya otomatis gagal (masuk daftar gagal_hapus) dan baris lama
-    tetap ada berdampingan dengan baris baru - sama seperti perilaku lama.
+    RPS manapun (atau cuma draft), hasilnya baris lama betulan hilang
+    (diganti baris baru, bukan lagi menyisakan duplikat seperti
+    sebelumnya); kalau sudah diajukan/diproses, penghapusannya otomatis
+    gagal (masuk daftar gagal_hapus) dan baris lama tetap ada berdampingan
+    dengan baris baru - sama seperti perilaku lama.
     """
     kode_mk_tersisa = {
         _clean_str(row.get("Kode MK")) for _, row in edited_df.iterrows()
@@ -186,9 +239,11 @@ def save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_df, original_d
     gagal_hapus = []
     for kode_mk_hapus in kode_mk_dihapus:
         try:
-            client.table("mata_kuliah").delete().eq("prodi_id", prodi_id).eq(
-                "tahun_kurikulum", tahun_kurikulum
-            ).eq("kode_mk", kode_mk_hapus).execute()
+            client.rpc("hapus_mata_kuliah_aman", {
+                "target_prodi_id": prodi_id,
+                "target_tahun_kurikulum": tahun_kurikulum,
+                "target_kode_mk": kode_mk_hapus,
+            }).execute()
         except Exception:
             gagal_hapus.append(kode_mk_hapus)
 
@@ -281,7 +336,7 @@ def save_cpl_df(client, prodi_id, tahun_kurikulum, edited_df, original_df):
             "prodi_id": prodi_id,
             "tahun_kurikulum": tahun_kurikulum,
             "kode_cpl": kode_cpl,
-            "deskripsi": _clean_str(row.get("Deskripsi CPL")),
+            "deskripsi": _clean_single_line_text(row.get("Deskripsi CPL")),
         }
         client.table("cpl").upsert(payload, on_conflict="prodi_id,kode_cpl,tahun_kurikulum").execute()
         saved += 1
@@ -331,7 +386,9 @@ def get_bpm_nama(client):
 # (bukan cuma Kaprodi/whitelist) - lihat catatan lengkap di sql/schema.sql.
 # --------------------------------------------------------------------------
 def list_pengguna(client):
-    resp = client.table("pengguna").select("id, email, nama, nip, role, prodi_id").order("email").execute()
+    resp = client.table("pengguna").select(
+        "id, email, nama, nip, role, prodi_id, pejabat_utama"
+    ).order("email").execute()
     return resp.data or []
 
 
@@ -342,6 +399,23 @@ def update_pengguna(client, user_id, role, prodi_id, nama=None, nip=None):
     if nip is not None:
         payload["nip"] = nip
     client.table("pengguna").update(payload).eq("id", user_id).execute()
+
+
+def set_pejabat_utama(client, user_id):
+    """Tetapkan satu akun Kaprodi/BPM sebagai "pejabat resmi" - yang namanya
+    dipakai otomatis di dokumen RPS (Nama Ketua Prodi / Nama Ka. BPM) kalau
+    ada LEBIH DARI SATU akun dengan role yang sama. Lihat set_pejabat_utama()
+    di sql/schema.sql untuk logika lengkapnya (termasuk melepas status ini
+    dari akun lain dengan role - dan untuk Kaprodi, Prodi - yang sama)."""
+    client.rpc("set_pejabat_utama", {"target_user_id": user_id}).execute()
+
+
+def sinkronkan_nama_pejabat(client):
+    """Timpa nama_kaprodi/nama_biro_pjm di SEMUA baris rps yang sudah ada
+    dengan nilai TERKINI - lihat sinkronkan_nama_pejabat() di sql/schema.sql.
+    Mengembalikan jumlah baris rps yang disentuh."""
+    resp = client.rpc("sinkronkan_nama_pejabat").execute()
+    return resp.data
 
 
 def save_pengguna_df(client, edited_df, prodi_rows, id_by_email):

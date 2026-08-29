@@ -35,6 +35,8 @@ from db_master import (
     list_whitelist_all,
     save_pengguna_df,
     save_whitelist_df,
+    set_pejabat_utama,
+    sinkronkan_nama_pejabat,
 )
 from rps_store import get_rps_stats
 from koordinator_ui import render_koordinator_tab
@@ -74,6 +76,9 @@ def render_admin_panel(client):
     st.divider()
 
     with st.expander("➕ Tambah Program Studi baru"):
+        pesan_prodi = st.session_state.pop("_pesan_prodi_baru", None)
+        if pesan_prodi:
+            st.success(pesan_prodi)
         with st.form("form_prodi_baru"):
             nama_prodi_baru = st.text_input(
                 "Nama Program Studi",
@@ -87,7 +92,7 @@ def render_admin_panel(client):
             else:
                 try:
                     insert_prodi(client, nama_prodi_baru)
-                    st.success(f"Program Studi '{nama_prodi_baru}' berhasil ditambahkan.")
+                    st.session_state["_pesan_prodi_baru"] = f"Program Studi '{nama_prodi_baru}' berhasil ditambahkan."
                     list_prodi_db.clear()
                     st.rerun()
                 except Exception as e:
@@ -129,6 +134,12 @@ def render_admin_panel(client):
         render_cpl_editor(client, prodi_id, tahun_sel)
 
     with tab_pengguna:
+        pesan_pengguna = st.session_state.pop("_pesan_pengguna", None)
+        if pesan_pengguna:
+            if pesan_pengguna.get("sukses"):
+                st.success(pesan_pengguna["sukses"])
+            for w in pesan_pengguna.get("peringatan") or []:
+                st.warning(w)
         st.caption(
             "Ubah Nama, NIP, Role, dan Prodi Homebase siapa pun yang sudah pernah "
             "Daftar - tabel ini bisa ditempel langsung dari Excel (klik sel **Nama** "
@@ -145,7 +156,7 @@ def render_admin_panel(client):
         else:
             prodi_nama_by_id = {p["id"]: p["nama"] for p in prodi_rows}
             id_by_email = {p["email"]: p["id"] for p in pengguna_rows}
-            df_pengguna = pd.DataFrame(
+            df_pengguna_full = pd.DataFrame(
                 [
                     {
                         "Email": p.get("email", "-"),
@@ -158,6 +169,19 @@ def render_admin_panel(client):
                 ],
                 columns=["Email", "Nama", "NIP", "Role", "Prodi Homebase"],
             )
+            cari_pengguna = st.text_input(
+                "🔍 Cari (Nama, Email, atau NIP)", key="cari_pengguna",
+            ).strip().lower()
+            if cari_pengguna:
+                mask = (
+                    df_pengguna_full["Nama"].str.lower().str.contains(cari_pengguna, na=False)
+                    | df_pengguna_full["Email"].str.lower().str.contains(cari_pengguna, na=False)
+                    | df_pengguna_full["NIP"].str.lower().str.contains(cari_pengguna, na=False)
+                )
+                df_pengguna = df_pengguna_full[mask].reset_index(drop=True)
+            else:
+                df_pengguna = df_pengguna_full
+            st.caption(f"Menampilkan {len(df_pengguna)} dari {len(df_pengguna_full)} pengguna. (Klik header kolom untuk mengurutkan.)")
             edited_pengguna = st.data_editor(
                 df_pengguna,
                 num_rows="fixed",
@@ -171,18 +195,84 @@ def render_admin_panel(client):
             if st.button("💾 Simpan Perubahan Pengguna", key="save_pengguna_btn"):
                 try:
                     n, tidak_dikenali = save_pengguna_df(client, edited_pengguna, prodi_rows, id_by_email)
-                    st.success(f"{n} akun diperbarui.")
+                    peringatan_pengguna = []
                     if tidak_dikenali:
                         daftar = ", ".join(f"{email} ('{nama}')" for email, nama in tidak_dikenali)
-                        st.warning(
+                        peringatan_pengguna.append(
                             f"Nama Prodi tidak dikenali (Prodi Homebase TIDAK diubah untuk "
                             f"baris ini, field lain tetap tersimpan): {daftar}"
                         )
+                    st.session_state["_pesan_pengguna"] = {
+                        "sukses": f"{n} akun diperbarui.", "peringatan": peringatan_pengguna,
+                    }
                     st.rerun()
                 except Exception as e:
                     st.error(f"Gagal menyimpan: {e}")
 
+        st.divider()
+        st.markdown("#### \U0001F396\uFE0F Tetapkan Pejabat Resmi (Kaprodi & BPM)")
+        pesan_pejabat = st.session_state.pop("_pesan_pejabat_utama", None)
+        if pesan_pejabat:
+            st.success(pesan_pejabat)
+        st.caption(
+            "Kalau ada LEBIH DARI SATU akun dengan role yang sama (mis. 2 akun ber-role "
+            "BPM), field \"Nama Ketua Prodi\"/\"Nama Ka. BPM\" yang otomatis terisi saat "
+            "Dosen mengisi RPS bisa salah ambil orang - tanpa ini, sistem cuma menebak "
+            "sembarang salah satu. Tetapkan di sini siapa yang resmi."
+        )
+        kandidat_pejabat = [p for p in pengguna_rows if p.get("role") in ("kaprodi", "bpm")]
+        if not kandidat_pejabat:
+            st.caption("Belum ada akun dengan role Kaprodi atau BPM.")
+        else:
+            label_by_id_pejabat = {}
+            for p in kandidat_pejabat:
+                if p.get("role") == "kaprodi":
+                    cakupan = prodi_nama_by_id.get(p.get("prodi_id"), "(Prodi belum diatur)")
+                else:
+                    cakupan = "se-institusi"
+                tanda = " \u2B50 resmi saat ini" if p.get("pejabat_utama") else ""
+                label = f"{p.get('nama') or p.get('email')} \u2014 {p.get('role').upper()} ({cakupan}){tanda}"
+                label_by_id_pejabat[label] = p["id"]
+            col_pilih, col_tombol = st.columns([3, 1])
+            with col_pilih:
+                pilihan_pejabat = st.selectbox(
+                    "Pilih akun", list(label_by_id_pejabat.keys()), key="pejabat_utama_pilihan",
+                    label_visibility="collapsed",
+                )
+            with col_tombol:
+                if st.button("Jadikan Resmi", key="set_pejabat_utama_btn", use_container_width=True):
+                    try:
+                        set_pejabat_utama(client, label_by_id_pejabat[pilihan_pejabat])
+                        st.session_state["_pesan_pejabat_utama"] = "Berhasil ditetapkan sebagai pejabat resmi."
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal menetapkan: {e}")
+
+        st.caption(
+            "Menetapkan pejabat resmi di atas TIDAK otomatis mengubah RPS yang sudah "
+            "ada - nama Kaprodi/BPM yang tersimpan di tiap RPS \"membeku\" sejak RPS "
+            "itu dibuat. Dokumen FINAL (RPS Tervalidasi) selalu memakai nama terkini "
+            "secara otomatis, tapi tampilan info umum di RPS yang belum final (draft/"
+            "diajukan/dst.) serta cadangan lokal yang diunduh masih memakai nilai "
+            "lama sampai disinkronkan manual lewat tombol ini."
+        )
+        if st.button("🔄 Sinkronkan Nama Pejabat ke Semua RPS", key="sinkron_pejabat_btn"):
+            try:
+                jumlah = sinkronkan_nama_pejabat(client)
+                st.session_state["_pesan_pejabat_utama"] = (
+                    f"Berhasil disinkronkan - {jumlah} RPS diperbarui ke nama pejabat terkini."
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gagal menyinkronkan: {e}")
+
     with tab_whitelist:
+        pesan_whitelist = st.session_state.pop("_pesan_whitelist", None)
+        if pesan_whitelist:
+            if pesan_whitelist.get("sukses"):
+                st.success(pesan_whitelist["sukses"])
+            for w in pesan_whitelist.get("peringatan") or []:
+                st.warning(w)
         st.caption(
             "Daftarkan NIP, Nama, dan Prodi Homebase Dosen SEBELUM mereka Daftar "
             "akun sendiri - berguna buat persiapan sebelum demo/pelatihan. Saat "
@@ -200,7 +290,7 @@ def render_admin_panel(client):
             "lalu tempel langsung ke tabel di bawah (klik sel NIP paling atas dulu)."
         )
         whitelist_rows = list_whitelist_all(client)
-        df_whitelist = pd.DataFrame(
+        df_whitelist_full = pd.DataFrame(
             [
                 {
                     "NIP": w["nip"],
@@ -212,6 +302,24 @@ def render_admin_panel(client):
             ],
             columns=["NIP", "Nama", "Prodi Homebase", "Status"],
         )
+        cari_whitelist = st.text_input(
+            "🔍 Cari (NIP atau Nama)", key="cari_whitelist",
+        ).strip().lower()
+        if cari_whitelist:
+            mask = (
+                df_whitelist_full["Nama"].str.lower().str.contains(cari_whitelist, na=False)
+                | df_whitelist_full["NIP"].str.lower().str.contains(cari_whitelist, na=False)
+            )
+            # Penyesuaian: df_whitelist (versi TERSARING ini) dipakai baik untuk
+            # ditampilkan MAUPUN sebagai "original_df" saat menyimpan di bawah -
+            # SENGAJA, supaya baris yang sedang disembunyikan oleh pencarian ini
+            # tidak ikut dibandingkan sama sekali (dan karenanya tidak pernah
+            # salah dianggap "dihapus" oleh save_whitelist_df hanya karena tidak
+            # sedang tampil).
+            df_whitelist = df_whitelist_full[mask].reset_index(drop=True)
+        else:
+            df_whitelist = df_whitelist_full
+        st.caption(f"Menampilkan {len(df_whitelist)} dari {len(df_whitelist_full)} baris. (Klik header kolom untuk mengurutkan.)")
         edited_whitelist = st.data_editor(
             df_whitelist,
             num_rows="dynamic",
@@ -222,13 +330,16 @@ def render_admin_panel(client):
         if st.button("💾 Simpan Daftar Pra-pendaftaran", key="save_whitelist_btn"):
             try:
                 n, tidak_dikenali = save_whitelist_df(client, edited_whitelist, prodi_rows, df_whitelist)
-                st.success(f"{n} baris disimpan.")
+                peringatan_whitelist = []
                 if tidak_dikenali:
                     daftar = ", ".join(f"NIP {nip} ('{nama}')" for nip, nama in tidak_dikenali)
-                    st.warning(
+                    peringatan_whitelist.append(
                         f"Nama Prodi tidak dikenali (Prodi Homebase TIDAK diisi untuk "
                         f"baris ini, NIP+Nama tetap tersimpan): {daftar}"
                     )
+                st.session_state["_pesan_whitelist"] = {
+                    "sukses": f"{n} baris disimpan.", "peringatan": peringatan_whitelist,
+                }
                 st.rerun()
             except Exception as e:
                 st.error(f"Gagal menyimpan: {e}")

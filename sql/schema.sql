@@ -354,8 +354,28 @@ drop policy if exists "admin update cpl" on public.cpl;
 create policy "admin update cpl" on public.cpl
     for update to authenticated using (public.is_admin()) with check (public.is_admin());
 
--- Sengaja TIDAK ada policy delete di prodi/mata_kuliah/cpl sama sekali (lihat
--- catatan di admin_panel.py) - hapus data master hanya lewat SQL Editor.
+-- Penyesuaian: policy delete DITAMBAHKAN (sebelumnya sengaja tidak ada sama
+-- sekali - lihat riwayat di admin_panel.py) - kini hapus data master lewat
+-- aplikasi (bukan cuma SQL Editor manual) sudah didukung, dengan penjagaan
+-- referensi diterapkan di level lain: rps.mata_kuliah_id "on delete restrict"
+-- (database) untuk Mata Kuliah, dan pengecekan manual rujukan CPMK->CPL
+-- (aplikasi, lihat save_cpl_df di db_master.py) untuk CPL - keduanya
+-- MENOLAK penghapusan (bukan diam-diam gagal) kalau masih dipakai di RPS.
+drop policy if exists "admin delete mata_kuliah" on public.mata_kuliah;
+create policy "admin delete mata_kuliah" on public.mata_kuliah
+    for delete to authenticated using (public.is_admin());
+
+drop policy if exists "kaprodi delete mata_kuliah" on public.mata_kuliah;
+create policy "kaprodi delete mata_kuliah" on public.mata_kuliah
+    for delete to authenticated using (public.is_kaprodi_of(prodi_id));
+
+drop policy if exists "admin delete cpl" on public.cpl;
+create policy "admin delete cpl" on public.cpl
+    for delete to authenticated using (public.is_admin());
+
+drop policy if exists "kaprodi delete cpl" on public.cpl;
+create policy "kaprodi delete cpl" on public.cpl
+    for delete to authenticated using (public.is_kaprodi_of(prodi_id));
 
 
 -- =============================================================================
@@ -1311,3 +1331,240 @@ grant execute on function public.get_pejabat_bpm() to authenticated;
 -- bukan dari kolom ini). Aman dijalankan berkali-kali.
 -- =============================================================================
 alter table public.mata_kuliah drop column if exists dosen_pengembang;
+
+-- =============================================================================
+-- PENYESUAIAN: Kolom pejabat_utama + cara menetapkannya secara eksplisit -
+-- sebelum ini, get_pejabat_prodi()/get_pejabat_bpm() pakai "limit 1" TANPA
+-- "order by" sama sekali. Kalau ada LEBIH DARI SATU akun dengan role yang
+-- sama (mis. 2 akun ber-role bpm), Postgres mengembalikan salah satu secara
+-- SEMBARANG (tidak konsisten, tidak bisa dipilih) - itulah sebabnya nama
+-- yang muncul di RPS kadang bukan yang dimaksud. Sekarang Admin bisa
+-- menetapkan secara eksplisit siapa yang "resmi" lewat set_pejabat_utama().
+-- =============================================================================
+alter table public.pengguna add column if not exists pejabat_utama boolean not null default false;
+
+create or replace function public.set_pejabat_utama(target_user_id uuid)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+    v_role text;
+    v_prodi_id uuid;
+begin
+    if not public.is_admin() then
+        raise exception 'Hanya Admin yang boleh menetapkan pejabat resmi.';
+    end if;
+
+    select role, prodi_id into v_role, v_prodi_id from public.pengguna where id = target_user_id;
+    if v_role is null then
+        raise exception 'Akun tidak ditemukan.';
+    end if;
+    if v_role not in ('kaprodi', 'bpm') then
+        raise exception 'Hanya akun ber-role Kaprodi atau BPM yang bisa ditetapkan sebagai pejabat resmi.';
+    end if;
+
+    -- Lepas status pejabat_utama dari akun LAIN dengan role sama - untuk
+    -- Kaprodi, dibatasi ke Prodi yang sama juga (tiap Prodi punya Kaprodi
+    -- resminya sendiri-sendiri, bukan cuma satu se-institusi seperti BPM).
+    if v_role = 'kaprodi' then
+        update public.pengguna set pejabat_utama = false
+        where role = 'kaprodi' and prodi_id = v_prodi_id and id <> target_user_id;
+    else
+        update public.pengguna set pejabat_utama = false
+        where role = 'bpm' and id <> target_user_id;
+    end if;
+
+    update public.pengguna set pejabat_utama = true where id = target_user_id;
+end;
+$$;
+
+grant execute on function public.set_pejabat_utama(uuid) to authenticated;
+
+-- Urutan baru: pejabat_utama = true diprioritaskan, baru fallback ke akun
+-- terlama (created_at) kalau belum ada yang ditetapkan sama sekali - supaya
+-- tetap ada hasil (bukan kosong) bahkan sebelum Admin sempat menetapkan.
+create or replace function public.get_pejabat_prodi(target_prodi_id uuid)
+returns table(kaprodi_nama text, kaprodi_email text)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select nama, email from public.pengguna
+    where role = 'kaprodi' and prodi_id = target_prodi_id
+    order by pejabat_utama desc, created_at asc
+    limit 1;
+$$;
+
+create or replace function public.get_pejabat_bpm()
+returns table(bpm_nama text, bpm_email text)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+    select nama, email from public.pengguna
+    where role = 'bpm'
+    order by pejabat_utama desc, created_at asc
+    limit 1;
+$$;
+
+grant execute on function public.get_pejabat_prodi(uuid) to authenticated;
+grant execute on function public.get_pejabat_bpm() to authenticated;
+
+-- =============================================================================
+-- PENYESUAIAN: Hapus Mata Kuliah yang lebih pintar - sebelum ini,
+-- "on delete restrict" di rps.mata_kuliah_id menolak SEMUA penghapusan kalau
+-- ada RPS apa pun yang menyinggung Mata Kuliah itu, TERMASUK RPS yang masih
+-- berstatus draft (belum pernah diajukan/dilihat siapa pun selain
+-- koordinatornya sendiri). Ini kadang bikin Mata Kuliah yang salah input
+-- tidak bisa dihapus, padahal drafnya sendiri aman untuk ikut terhapus.
+-- Sekarang: draft ikut terhapus otomatis bersama Mata Kuliah-nya, tapi RPS
+-- yang SUDAH diajukan/disetujui/divalidasi/ditolak tetap melindungi Mata
+-- Kuliah dari penghapusan seperti sebelumnya (ada jejak/riwayat resmi).
+-- =============================================================================
+create or replace function public.hapus_mata_kuliah_aman(
+    target_prodi_id uuid, target_tahun_kurikulum integer, target_kode_mk text
+)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+    v_mk_id uuid;
+    v_ada_non_draft boolean;
+begin
+    if not (public.is_admin() or public.is_kaprodi_of(target_prodi_id)) then
+        raise exception 'Anda tidak berwenang menghapus Mata Kuliah ini.';
+    end if;
+
+    select id into v_mk_id from public.mata_kuliah
+    where prodi_id = target_prodi_id
+      and tahun_kurikulum = target_tahun_kurikulum
+      and kode_mk = target_kode_mk;
+
+    if v_mk_id is null then
+        return; -- sudah tidak ada (atau tidak cocok) - anggap aman, tidak perlu error
+    end if;
+
+    select exists(
+        select 1 from public.rps where mata_kuliah_id = v_mk_id and status <> 'draft'
+    ) into v_ada_non_draft;
+
+    if v_ada_non_draft then
+        raise exception 'Mata Kuliah ini sudah pernah diajukan/disetujui/divalidasi - tidak bisa dihapus.';
+    end if;
+
+    -- Aman: satu-satunya RPS yang mungkin masih menyinggung Mata Kuliah ini
+    -- (kalau ada) berstatus draft murni - hapus dulu, baru Mata Kuliahnya.
+    delete from public.rps where mata_kuliah_id = v_mk_id and status = 'draft';
+    delete from public.mata_kuliah where id = v_mk_id;
+end;
+$$;
+
+grant execute on function public.hapus_mata_kuliah_aman(uuid, integer, text) to authenticated;
+
+-- =============================================================================
+-- PENYESUAIAN: Kaprodi bisa membuka kembali RPS yang SUDAH divalidasi BPM,
+-- untuk skenario revisi (mis. ada kesalahan yang baru ketahuan setelah
+-- final). RPS kembali ke status draft (isi dokumennya TETAP seperti versi
+-- tervalidasi terakhir, koordinator tinggal edit dari situ) dan otomatis
+-- HILANG dari "RPS Tervalidasi" sampai diajukan & divalidasi ulang dari
+-- awal (Kaprodi -> BPM, bukan cuma re-approve sepihak). Alasan pembukaan
+-- disimpan di catatan_kaprodi supaya koordinator tahu kenapa - lihat
+-- app.py bagian tampilan sidebar untuk cara catatan ini ditampilkan ke
+-- Dosen (dibedakan dari catatan penolakan biasa).
+-- =============================================================================
+create or replace function public.buka_kembali_rps(target_rps_id uuid, catatan text default null)
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+    v_prodi_id uuid;
+begin
+    select mk.prodi_id into v_prodi_id
+    from public.rps r
+    join public.mata_kuliah mk on mk.id = r.mata_kuliah_id
+    where r.id = target_rps_id;
+
+    if v_prodi_id is null then
+        raise exception 'RPS tidak ditemukan.';
+    end if;
+
+    if not (public.is_admin() or public.is_kaprodi_of(v_prodi_id)) then
+        raise exception 'Anda tidak berwenang membuka kembali RPS ini.';
+    end if;
+
+    update public.rps
+    set status = 'draft',
+        catatan_kaprodi = catatan,
+        diproses_oleh = null, diproses_pada = null,
+        catatan_bpm = null, diproses_oleh_bpm = null, diproses_pada_bpm = null,
+        diajukan_pada = null
+    where id = target_rps_id and status = 'divalidasi';
+
+    if not found then
+        raise exception 'RPS tidak ditemukan, atau statusnya bukan "divalidasi" - cuma RPS yang sudah final yang bisa dibuka kembali dengan cara ini.';
+    end if;
+end;
+$$;
+
+grant execute on function public.buka_kembali_rps(uuid, text) to authenticated;
+
+-- =============================================================================
+-- PENYESUAIAN: Sinkronisasi nama Kaprodi/BPM ke SEMUA RPS yang sudah ada -
+-- nama_kaprodi/nama_biro_pjm yang tersimpan di rps.data "membeku" sejak RPS
+-- itu pertama dibuat (lihat catatan di rps_browse.py) - kalau pejabat resmi
+-- berganti SESUDAHNYA, RPS lama tidak otomatis ikut ter-update (dokumen
+-- FINAL yang diunduh sudah diperbaiki terpisah supaya selalu pakai nama
+-- terkini, tapi tampilan info_umum saat Dosen membuka RPS-nya sendiri, atau
+-- cadangan lokal yang diunduh, masih memakai nilai lama tersimpan). Fungsi
+-- ini menimpa nama_kaprodi/nama_biro_pjm di SEMUA baris rps sekaligus
+-- dengan nilai TERKINI dari get_pejabat_prodi()/get_pejabat_bpm() - jalankan
+-- lewat tombol "Sinkronkan Nama Pejabat" di Panel Admin, aman diulang kapan
+-- saja (idempotent, tidak menyentuh field lain).
+-- =============================================================================
+create or replace function public.sinkronkan_nama_pejabat()
+returns integer
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+    v_count integer := 0;
+    r record;
+    v_nama_kaprodi text;
+    v_nama_bpm text;
+begin
+    if not public.is_admin() then
+        raise exception 'Hanya Admin yang boleh menjalankan sinkronisasi ini.';
+    end if;
+
+    select bpm_nama into v_nama_bpm from public.get_pejabat_bpm();
+
+    for r in
+        select rps.id as rps_id, mk.prodi_id as prodi_id
+        from public.rps
+        join public.mata_kuliah mk on mk.id = rps.mata_kuliah_id
+    loop
+        select kaprodi_nama into v_nama_kaprodi from public.get_pejabat_prodi(r.prodi_id);
+
+        update public.rps
+        set data = jsonb_set(
+            jsonb_set(
+                coalesce(data, '{}'::jsonb),
+                '{info_umum,nama_kaprodi}', to_jsonb(coalesce(v_nama_kaprodi, '')), true
+            ),
+            '{info_umum,nama_biro_pjm}', to_jsonb(coalesce(v_nama_bpm, '')), true
+        )
+        where id = r.rps_id;
+
+        v_count := v_count + 1;
+    end loop;
+
+    return v_count;
+end;
+$$;
+
+grant execute on function public.sinkronkan_nama_pejabat() to authenticated;
