@@ -43,6 +43,7 @@ from auth import require_login, get_client
 from db_master import (
     list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum,
     get_kaprodi_nama, get_bpm_nama, _clean_single_line_text,
+    get_tahun_kurikulum_terbaru, index_tahun_default,
 )
 from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
@@ -887,9 +888,13 @@ with st.sidebar:
     # Kurikulum berdampingan (mis. 2021 & 2026), masing-masing Mata Kuliahnya
     # terpisah sepenuhnya (baris database berbeda, koordinator bisa berbeda).
     tahun_options = list_tahun_kurikulum(client, prodi_id)
+    if st.session_state.tahun_sel in tahun_options:
+        tahun_index = tahun_options.index(st.session_state.tahun_sel)
+    else:
+        tahun_index = index_tahun_default(tahun_options, get_tahun_kurikulum_terbaru(client, prodi_id))
     tahun_sel = st.selectbox(
         "Tahun Kurikulum", tahun_options,
-        index=tahun_options.index(st.session_state.tahun_sel) if st.session_state.tahun_sel in tahun_options else len(tahun_options) - 1,
+        index=tahun_index,
         key="tahun_selectbox",
     )
     if tahun_sel != st.session_state.tahun_sel:

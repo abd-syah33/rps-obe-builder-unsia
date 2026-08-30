@@ -60,6 +60,33 @@ def list_tahun_kurikulum(_client, prodi_id):
     return sorted(tahun_ada | set(DEFAULT_TAHUN_OPTIONS))
 
 
+@st.cache_data(ttl=30)
+def get_tahun_kurikulum_terbaru(_client, prodi_id):
+    """Tahun Kurikulum TERBARU yang BENAR-BENAR sudah ada Mata Kuliahnya di
+    Prodi ini - beda dari sekadar "opsi terakhir di list_tahun_kurikulum()",
+    yang bisa memuat tahun rencana dari DEFAULT_TAHUN_OPTIONS yang belum ada
+    isinya sama sekali (mis. tahun kurikulum baru yang baru mau disiapkan,
+    sementara operasionalnya masih di tahun sebelumnya). Dipakai sebagai
+    default otomatis di selector Tahun Kurikulum & Statistik, supaya tidak
+    salah kira "tahun terbaru di daftar pilihan" = "tahun yang aktif
+    dipakai sekarang". None kalau Prodi ini belum punya Mata Kuliah sama
+    sekali (fallback ke opsi terakhir di list_tahun_kurikulum() dipakai
+    pemanggil kalau ini None)."""
+    resp = _client.table("mata_kuliah").select("tahun_kurikulum").eq("prodi_id", prodi_id).execute()
+    tahun_list = [r["tahun_kurikulum"] for r in (resp.data or []) if r.get("tahun_kurikulum") is not None]
+    return max(tahun_list) if tahun_list else None
+
+
+def index_tahun_default(tahun_options, tahun_terbaru):
+    """Hitung index untuk default selectbox Tahun Kurikulum - pakai
+    tahun_terbaru (dari get_tahun_kurikulum_terbaru) kalau ada dan
+    tercantum di opsi, fallback ke opsi TERAKHIR (perilaku lama) kalau
+    tidak (mis. Prodi belum punya Mata Kuliah sama sekali)."""
+    if tahun_terbaru is not None and tahun_terbaru in tahun_options:
+        return tahun_options.index(tahun_terbaru)
+    return len(tahun_options) - 1
+
+
 def _sort_cpl(cpl_df):
     """Urutkan CPL secara alami (S1..S10, P1..P3, KU1..KU9, KK1..KK4),
     bukan alfabetis (yang akan salah urut S10 sebelum S2)."""

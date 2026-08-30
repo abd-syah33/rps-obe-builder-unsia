@@ -21,13 +21,13 @@ auth.py) supaya auth.users ikut terhapus, bukan cuma baris di tabel
 pengguna.
 """
 
-from collections import Counter
-
 import pandas as pd
 import streamlit as st
 
 from db_master import (
     get_prodi_id,
+    get_tahun_kurikulum_terbaru,
+    index_tahun_default,
     insert_prodi,
     list_prodi_db,
     list_pengguna,
@@ -38,34 +38,14 @@ from db_master import (
     set_pejabat_utama,
     sinkronkan_nama_pejabat,
 )
-from rps_store import get_rps_stats
 from koordinator_ui import render_koordinator_tab
 from kurikulum_ui import render_mk_editor, render_cpl_editor
+from stats_ui import render_statistik_institusi
 
 
 def render_stats(client):
     with st.expander("📊 Statistik RPS", expanded=True):
-        stats_rows = get_rps_stats(client)
-        if not stats_rows:
-            st.caption("Belum ada RPS yang tersimpan sama sekali.")
-            return
-
-        status_count = Counter(r.get("status", "draft") for r in stats_rows)
-        labels = [
-            ("draft", "📝 Draft"), ("diajukan", "📤 Diajukan"),
-            ("disetujui", "✅ Disetujui"), ("ditolak", "↩️ Ditolak"),
-        ]
-        cols = st.columns(4)
-        for col, (key, label) in zip(cols, labels):
-            col.metric(label, status_count.get(key, 0))
-
-        prodi_count = Counter()
-        for r in stats_rows:
-            mk = r.get("mata_kuliah") or {}
-            nama_prodi = (mk.get("prodi") or {}).get("nama", "-")
-            prodi_count[nama_prodi] += 1
-        df_prodi = pd.DataFrame(sorted(prodi_count.items()), columns=["Program Studi", "Jumlah RPS"])
-        st.dataframe(df_prodi, use_container_width=True, hide_index=True)
+        render_statistik_institusi(client, list_prodi_db(client))
 
 
 def render_admin_panel(client):
@@ -116,7 +96,7 @@ def render_admin_panel(client):
     tahun_options = list_tahun_kurikulum(client, prodi_id)
     tahun_sel = st.selectbox(
         "Tahun Kurikulum", tahun_options,
-        index=len(tahun_options) - 1,  # default ke tahun terbaru
+        index=index_tahun_default(tahun_options, get_tahun_kurikulum_terbaru(client, prodi_id)),
         key=f"admin_tahun_sel_{prodi_id}",
     )
 

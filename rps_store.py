@@ -118,15 +118,6 @@ def list_diajukan(_client):
     return resp.data or []
 
 
-@st.cache_data(ttl=15)
-def get_rps_stats(_client):
-    """Data mentah untuk dashboard statistik Admin: satu baris per RPS berisi
-    status & nama Prodi-nya. Diagregasi di sisi Python (lihat admin_panel.py)
-    - jumlahnya kecil (skala menengah), jadi tidak perlu agregasi di SQL."""
-    resp = _client.table("rps").select("status, mata_kuliah(prodi(nama))").execute()
-    return resp.data or []
-
-
 @st.cache_data(ttl=30)
 def list_divalidasi(_client):
     """RPS berstatus 'divalidasi' (lolos Kaprodi DAN BPM - final) - RLS

@@ -10,6 +10,7 @@ daftar koordinator lama ke koordinator baru."""
 import streamlit as st
 
 from rps_store import list_my_rps, load_riwayat
+from stats_ui import render_statistik_dosen
 
 STATUS_LABEL = {
     "draft": "📝 Draft",
@@ -30,6 +31,9 @@ def render_rps_saya(client, pengguna):
             "Hubungi Kaprodi/Admin Program Studi terkait."
         )
         return
+
+    render_statistik_dosen(rows)
+    st.divider()
 
     for mk in rows:
         prodi = mk.get("prodi") or {}

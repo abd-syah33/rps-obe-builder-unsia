@@ -4,7 +4,7 @@ Program Studi yang diampu."""
 
 import streamlit as st
 
-from db_master import list_tahun_kurikulum, load_master_db
+from db_master import get_tahun_kurikulum_terbaru, index_tahun_default, list_tahun_kurikulum, load_master_db
 from rps_store import (
     buka_kembali_rps,
     list_diajukan,
@@ -15,6 +15,7 @@ from rps_store import (
 from koordinator_ui import render_koordinator_tab
 from kurikulum_ui import render_mk_editor, render_cpl_editor
 from rps_preview import render_rps_preview
+from stats_ui import render_statistik_kaprodi
 
 
 def render_kaprodi_panel(client, pengguna):
@@ -32,13 +33,16 @@ def render_kaprodi_panel(client, pengguna):
     tahun_options = list_tahun_kurikulum(client, prodi_id)
     tahun_sel = st.selectbox(
         "Tahun Kurikulum", tahun_options,
-        index=len(tahun_options) - 1,  # default ke tahun terbaru
+        index=index_tahun_default(tahun_options, get_tahun_kurikulum_terbaru(client, prodi_id)),
         key=f"kaprodi_tahun_sel_{prodi_id}",
     )
 
-    tab_review, tab_revisi, tab_mk, tab_koor, tab_cpl = st.tabs(
-        ["✅ Review RPS", "🔓 Buka Kembali RPS Final", "📚 Mata Kuliah", "🎓 Koordinator", "🎯 CPL"]
+    tab_stats, tab_review, tab_revisi, tab_mk, tab_koor, tab_cpl = st.tabs(
+        ["📊 Statistik", "✅ Review RPS", "🔓 Buka Kembali RPS Final", "📚 Mata Kuliah", "🎓 Koordinator", "🎯 CPL"]
     )
+
+    with tab_stats:
+        render_statistik_kaprodi(client, prodi_id)
 
     with tab_review:
         render_review_rps(client)

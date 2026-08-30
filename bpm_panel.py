@@ -10,9 +10,10 @@ lagi dari awal (lihat catatan di ajukan_rps() pada sql/schema.sql)."""
 
 import streamlit as st
 
-from db_master import load_master_db
+from db_master import load_master_db, list_prodi_db
 from rps_store import list_bpm_queue, validasi_bpm_rps, tolak_bpm_rps
 from rps_preview import render_rps_preview
+from stats_ui import render_statistik_institusi
 
 
 def render_bpm_panel(client, pengguna):
@@ -22,6 +23,17 @@ def render_bpm_panel(client, pengguna):
         "RPS baru muncul di menu \"RPS Tervalidasi\" (bisa dilihat semua Dosen) "
         "setelah lolos validasi di sini."
     )
+
+    tab_stats, tab_validasi = st.tabs(["📊 Statistik", "✅ Validasi RPS"])
+
+    with tab_stats:
+        render_statistik_institusi(client, list_prodi_db(client))
+
+    with tab_validasi:
+        render_validasi_queue(client)
+
+
+def render_validasi_queue(client):
     pesan_bpm = st.session_state.pop("_pesan_bpm", None)
     if pesan_bpm:
         st.success(pesan_bpm)

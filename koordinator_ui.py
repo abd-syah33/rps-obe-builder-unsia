@@ -34,6 +34,41 @@ def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
         st.info(f"Belum ada Mata Kuliah di Prodi ini untuk kurikulum {tahun_kurikulum}.")
         return
 
+    col_cari, col_urut, col_filter = st.columns([2, 1.3, 1.5])
+    with col_cari:
+        cari = st.text_input(
+            "\U0001F50D Cari (Kode/Nama Mata Kuliah)",
+            key=f"koor_cari_{prodi_id}_{tahun_kurikulum}",
+        ).strip().lower()
+    with col_urut:
+        urutan = st.selectbox(
+            "Urutkan", ["Semester", "Kode MK (A-Z)", "Nama MK (A-Z)"],
+            key=f"koor_urut_{prodi_id}_{tahun_kurikulum}",
+        )
+    with col_filter:
+        hanya_kosong = st.checkbox(
+            "Hanya tanpa koordinator", key=f"koor_hanya_kosong_{prodi_id}_{tahun_kurikulum}",
+        )
+
+    mk_tampil = mk_df
+    if cari:
+        mk_tampil = mk_tampil[
+            mk_tampil["Kode MK"].astype(str).str.lower().str.contains(cari)
+            | mk_tampil["Nama Mata Kuliah"].astype(str).str.lower().str.contains(cari)
+        ]
+    if hanya_kosong:
+        mk_tampil = mk_tampil[mk_tampil["koordinator_user_id"].isna() & mk_tampil["koordinator_nip"].isna()]
+    if urutan == "Kode MK (A-Z)":
+        mk_tampil = mk_tampil.sort_values("Kode MK")
+    elif urutan == "Nama MK (A-Z)":
+        mk_tampil = mk_tampil.sort_values("Nama Mata Kuliah")
+    else:
+        mk_tampil = mk_tampil.sort_values("Semester")
+
+    st.caption(f"Menampilkan {len(mk_tampil)} dari {len(mk_df)} Mata Kuliah.")
+    if mk_tampil.empty:
+        st.caption("Tidak ada Mata Kuliah yang cocok dengan pencarian/filter ini.")
+
     dosen_rows = list_dosen(client)
     label_by_id = {d["id"]: (d.get("nama") or d["email"]) for d in dosen_rows}
     id_by_label = {v: k for k, v in label_by_id.items()}
@@ -44,7 +79,7 @@ def render_koordinator_tab(client, prodi_id, tahun_kurikulum):
 
     dosen_options = [BELUM_DITETAPKAN] + list(id_by_label.keys()) + list(label_by_nip.values())
 
-    for _, mk in mk_df.iterrows():
+    for _, mk in mk_tampil.iterrows():
         with st.container(border=True):
             col1, col2, col3 = st.columns([3, 3, 1])
             with col1:

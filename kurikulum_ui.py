@@ -5,6 +5,7 @@ UI bersama untuk edit Mata Kuliah & CPL, dipakai baik oleh admin_panel.py
 diampu sendiri) - supaya logikanya tidak ditulis dua kali.
 """
 
+import pandas as pd
 import streamlit as st
 
 from db_master import load_master_db, save_cpl_df, save_mata_kuliah_df
@@ -44,14 +45,65 @@ def render_mk_editor(client, prodi_id, tahun_kurikulum):
 
     mk_df, _ = load_master_db(client, prodi_id, tahun_kurikulum)
     mk_df_tampil = mk_df.drop(columns=["id", "koordinator_user_id", "koordinator_nip"])
-    edited_mk = st.data_editor(
-        mk_df_tampil,
+
+    col_cari, col_urut = st.columns([2, 1.3])
+    with col_cari:
+        cari = st.text_input(
+            "\U0001F50D Cari (Kode/Nama Mata Kuliah)", key=f"mk_cari_{prodi_id}_{tahun_kurikulum}",
+        ).strip().lower()
+    with col_urut:
+        urutan = st.selectbox(
+            "Urutkan", ["Semester", "Kode MK (A-Z)", "Nama MK (A-Z)"],
+            key=f"mk_urut_{prodi_id}_{tahun_kurikulum}",
+        )
+
+    if cari:
+        mask = (
+            mk_df_tampil["Kode MK"].astype(str).str.lower().str.contains(cari)
+            | mk_df_tampil["Nama Mata Kuliah"].astype(str).str.lower().str.contains(cari)
+        )
+    else:
+        mask = pd.Series(True, index=mk_df_tampil.index)
+
+    df_terfilter = mk_df_tampil[mask]
+    if urutan == "Kode MK (A-Z)":
+        df_terfilter = df_terfilter.sort_values("Kode MK")
+    elif urutan == "Nama MK (A-Z)":
+        df_terfilter = df_terfilter.sort_values("Nama Mata Kuliah")
+    else:
+        df_terfilter = df_terfilter.sort_values("Semester")
+
+    if cari:
+        st.caption(f"Menampilkan {len(df_terfilter)} dari {len(mk_df_tampil)} Mata Kuliah yang cocok pencarian.")
+        st.caption(
+            "\u26A0\uFE0F Simpan dulu perubahan sebelum mengubah kata kunci pencarian - "
+            "mengubah pencarian akan me-reset tabel ke data tersimpan terakhir."
+        )
+
+    # Key widget SENGAJA ikut berubah kalau kata kunci pencarian/urutan
+    # berubah - supaya st.data_editor selalu dianggap widget yang benar-benar
+    # BARU saat filter berubah (bukan "widget lama, data baru" yang berisiko
+    # menampilkan data basi - gotcha yang sama seperti dibahas di app.py
+    # bagian sinkronkan_widget_pertemuan()). Konsekuensinya: perubahan yang
+    # BELUM disimpan hilang kalau pencarian/urutan diubah - lihat peringatan
+    # di atas.
+    editor_key = f"mk_editor_{prodi_id}_{tahun_kurikulum}_{cari}_{urutan}"
+    edited_terfilter = st.data_editor(
+        df_terfilter,
         num_rows="dynamic",
         use_container_width=True,
-        key=f"mk_editor_{prodi_id}_{tahun_kurikulum}",
+        hide_index=True,
+        key=editor_key,
     )
     if st.button("💾 Simpan Perubahan Mata Kuliah", key=f"save_mk_btn_{prodi_id}_{tahun_kurikulum}"):
         try:
+            # Baris yang sedang DISEMBUNYIKAN pencarian (tidak match "mask")
+            # digabung APA ADANYA (tidak disentuh) bersama hasil edit pada
+            # baris yang SEDANG ditampilkan - supaya baris yang cuma
+            # "tersembunyi karena difilter" TIDAK ikut dianggap "dihapus
+            # pengguna" oleh save_mata_kuliah_df (yang mendeteksi hapus lewat
+            # selisih Kode MK antara edited_df vs original_df).
+            edited_mk = pd.concat([mk_df_tampil[~mask], edited_terfilter], ignore_index=True)
             n, gagal_hapus = save_mata_kuliah_df(client, prodi_id, tahun_kurikulum, edited_mk, mk_df_tampil)
             peringatan = []
             if gagal_hapus:
