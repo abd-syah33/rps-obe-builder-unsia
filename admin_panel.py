@@ -41,19 +41,16 @@ from db_master import (
 from koordinator_ui import render_koordinator_tab
 from kurikulum_ui import render_mk_editor, render_cpl_editor
 from stats_ui import render_statistik_institusi
+from admin_rps_ui import render_kelola_rps_dosen
 
 
 def render_stats(client):
-    with st.expander("📊 Statistik RPS", expanded=True):
-        render_statistik_institusi(client, list_prodi_db(client))
+    render_statistik_institusi(client, list_prodi_db(client))
 
 
 def render_admin_panel(client):
     st.title("⚙️ Panel Admin · RPS Builder")
     st.caption("Kelola data master Program Studi, Mata Kuliah, CPL, dan pantau progres pengisian RPS.")
-
-    render_stats(client)
-    st.divider()
 
     with st.expander("➕ Tambah Program Studi baru"):
         pesan_prodi = st.session_state.pop("_pesan_prodi_baru", None)
@@ -100,9 +97,15 @@ def render_admin_panel(client):
         key=f"admin_tahun_sel_{prodi_id}",
     )
 
-    tab_mk, tab_koor, tab_cpl, tab_pengguna, tab_whitelist = st.tabs(
-        ["📚 Mata Kuliah", "🎓 Koordinator", "🎯 CPL", "👥 Pengguna", "📋 Pra-daftar"]
+    tab_stats, tab_kelola_rps, tab_mk, tab_koor, tab_cpl, tab_pengguna, tab_whitelist = st.tabs(
+        ["📊 Statistik", "🔐 Kelola RPS Dosen", "📚 Mata Kuliah", "🎓 Koordinator", "🎯 CPL", "👥 Pengguna", "📋 Pra-daftar"]
     )
+
+    with tab_stats:
+        render_stats(client)
+
+    with tab_kelola_rps:
+        render_kelola_rps_dosen(client, prodi_rows)
 
     with tab_mk:
         render_mk_editor(client, prodi_id, tahun_sel)
@@ -230,17 +233,19 @@ def render_admin_panel(client):
 
         st.caption(
             "Menetapkan pejabat resmi di atas TIDAK otomatis mengubah RPS yang sudah "
-            "ada - nama Kaprodi/BPM yang tersimpan di tiap RPS \"membeku\" sejak RPS "
-            "itu dibuat. Dokumen FINAL (RPS Tervalidasi) selalu memakai nama terkini "
-            "secara otomatis, tapi tampilan info umum di RPS yang belum final (draft/"
-            "diajukan/dst.) serta cadangan lokal yang diunduh masih memakai nilai "
-            "lama sampai disinkronkan manual lewat tombol ini."
+            "ada - nama Kaprodi/BPM/Koordinator yang tersimpan di tiap RPS \"membeku\" sejak "
+            "RPS itu dibuat/terakhir disimpan (termasuk kalau koordinatornya diganti "
+            "Kaprodi setelahnya). Dokumen FINAL (RPS Tervalidasi) selalu memakai nama "
+            "terkini secara otomatis, tapi tampilan info umum di RPS yang belum final "
+            "(draft/diajukan/dst. - termasuk yang SEDANG TERKUNCI menunggu review, yang "
+            "tidak bisa dibenahi Dosen sendiri) serta cadangan lokal yang diunduh masih "
+            "memakai nilai lama sampai disinkronkan manual lewat tombol ini."
         )
-        if st.button("🔄 Sinkronkan Nama Pejabat ke Semua RPS", key="sinkron_pejabat_btn"):
+        if st.button("🔄 Sinkronkan Nama Pejabat & Koordinator ke Semua RPS", key="sinkron_pejabat_btn"):
             try:
                 jumlah = sinkronkan_nama_pejabat(client)
                 st.session_state["_pesan_pejabat_utama"] = (
-                    f"Berhasil disinkronkan - {jumlah} RPS diperbarui ke nama pejabat terkini."
+                    f"Berhasil disinkronkan - {jumlah} RPS diperbarui ke nama pejabat & koordinator terkini."
                 )
                 st.rerun()
             except Exception as e:

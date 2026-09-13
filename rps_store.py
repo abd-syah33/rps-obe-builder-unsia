@@ -22,7 +22,7 @@ def load_rps(client, mata_kuliah_id):
         client.table("rps")
         .select(
             "id, data, status, catatan_kaprodi, catatan_bpm, diajukan_pada, "
-            "diproses_pada, diproses_pada_bpm, created_at, updated_at"
+            "diproses_pada, diproses_pada_bpm, created_at, updated_at, dikunci_admin"
         )
         .eq("mata_kuliah_id", mata_kuliah_id)
         .limit(1)
@@ -185,3 +185,40 @@ def buka_kembali_rps(client, rps_id, catatan=None):
     lihat buka_kembali_rps() di sql/schema.sql untuk aturan wewenang &
     field apa saja yang ikut dikosongkan."""
     client.rpc("buka_kembali_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
+
+
+def list_semua_rps_admin(client, prodi_id=None):
+    """Semua Mata Kuliah + RPS-nya (kalau ada) untuk Admin melihat &
+    mengelola akses edit LINTAS SEMUA DOSEN - prodi_id=None berarti semua
+    Prodi sekaligus. Mata Kuliah yang belum ada RPS-nya tetap disertakan
+    (dengan rps=None) supaya "belum diisi" juga kelihatan, bukan cuma yang
+    sudah ada isinya."""
+    query = client.table("mata_kuliah").select(
+        "id, kode_mk, nama_mk, tahun_kurikulum, prodi_id, koordinator_user_id, koordinator_nip, "
+        "prodi(nama), rps(id, status, data, dikunci_admin, updated_at)"
+    )
+    if prodi_id:
+        query = query.eq("prodi_id", prodi_id)
+    resp = query.execute()
+    hasil = []
+    for r in (resp.data or []):
+        rps_list = r.get("rps") or []
+        rps_row = rps_list[0] if isinstance(rps_list, list) and rps_list else (
+            rps_list if not isinstance(rps_list, list) else None
+        )
+        hasil.append({
+            "mata_kuliah_id": r["id"], "kode_mk": r["kode_mk"], "nama_mk": r["nama_mk"],
+            "tahun_kurikulum": r.get("tahun_kurikulum"), "prodi_id": r.get("prodi_id"),
+            "prodi_nama": (r.get("prodi") or {}).get("nama", "-"),
+            "koordinator_user_id": r.get("koordinator_user_id"),
+            "koordinator_nip": r.get("koordinator_nip"),
+            "rps": rps_row,
+        })
+    return hasil
+
+
+def set_kunci_admin(client, rps_id, kunci):
+    """Kunci (kunci=True) atau buka (kunci=False) akses edit satu RPS -
+    lihat set_kunci_admin() di sql/schema.sql. Berlaku APA PUN status
+    RPS-nya saat ini."""
+    client.rpc("set_kunci_admin", {"target_rps_id": rps_id, "kunci": kunci}).execute()

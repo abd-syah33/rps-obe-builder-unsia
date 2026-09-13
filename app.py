@@ -23,6 +23,7 @@ import glob
 import os
 import json
 import hashlib
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -42,7 +43,7 @@ from docx_export import BOBOT_KATEGORI
 from auth import require_login, get_client
 from db_master import (
     list_prodi_db, get_prodi_id, load_master_db, list_tahun_kurikulum,
-    get_kaprodi_nama, get_bpm_nama, _clean_single_line_text,
+    get_kaprodi_nama, get_bpm_nama, get_koordinator_nama, _clean_single_line_text,
     get_tahun_kurikulum_terbaru, index_tahun_default,
 )
 from admin_panel import render_admin_panel
@@ -141,6 +142,7 @@ def load_pejabat_config():
 BLOOM_LEVELS = ["C1", "C2", "C3", "C4", "C5", "C6"]
 METODE_OPTIONS = ["SGD", "RPS", "DL", "SDL", "CoL", "CbL", "CtL", "PjBL", "PBL", "BL"]
 BENTUK_OPTIONS = ["EL-1", "EL-2", "EL-3", "EL-4", "EL-5", "EL-6", "EL-7", "EL-8", "EL-9"]
+CPMK_REF_OPTIONS = [f"CPMK-{i}" for i in range(1, 6)]
 
 BLOOM_INFO = {
     "C1": "Remembering", "C2": "Understanding", "C3": "Applying",
@@ -241,7 +243,7 @@ dalam Bahasa Indonesia:
 def default_pertemuan():
     pertemuan = {
         m: {
-            "sub_cpmk_desc": "", "cpmk_ref": None, "bloom": [], "materi": "",
+            "sub_cpmk_desc": "", "cpmk_ref": [], "bloom": [], "materi": "",
             "metode": [], "bentuk": [], "bentuk_asesmen": "", "indikator": "",
         } for m in range(1, N_MINGGU + 1)
     }
@@ -281,7 +283,7 @@ def sinkronkan_widget_pertemuan():
     minggu sekaligus."""
     for m in range(1, N_MINGGU + 1):
         p = st.session_state.pertemuan_data[m]
-        st.session_state[mk_key(f"prt_cpmkref_{m}")] = p["cpmk_ref"] or "-"
+        st.session_state[mk_key(f"prt_cpmkref_{m}")] = p["cpmk_ref"] or []
         st.session_state[mk_key(f"prt_sub_{m}")] = p["sub_cpmk_desc"]
         st.session_state[mk_key(f"prt_bloom_{m}")] = p["bloom"]
         st.session_state[mk_key(f"prt_materi_{m}")] = p["materi"]
@@ -341,7 +343,7 @@ def pertemuan_to_df(pertemuan_data):
         rows.append({
             "Minggu": m,
             "Sub-CPMK": p.get("sub_cpmk_desc", ""),
-            "CPMK Ref": p.get("cpmk_ref") or "-",
+            "CPMK Ref": ", ".join(p.get("cpmk_ref") or []) or "-",
             "Bloom": ", ".join(p.get("bloom", [])),
             "Indikator": p.get("indikator", ""),
             "Bentuk Asesmen": p.get("bentuk_asesmen", ""),
@@ -409,26 +411,16 @@ def df_to_pertemuan(df):
     _normalisasi_multi), supaya pemanggil bisa menampilkannya ke pengguna."""
     data = {}
     daftar_peringatan = []
-    cpmk_ref_valid = [f"CPMK-{i}" for i in range(1, 6)]
     for _, row in df.iterrows():
         if pd.isna(row["Minggu"]):
             continue  # lewati baris kosong (mis. sisa baris terpakai dari Excel)
         m = int(row["Minggu"])
         cpmk_ref_raw = row["CPMK Ref"]
-        if pd.isna(cpmk_ref_raw) or cpmk_ref_raw in ("-", None, ""):
-            cpmk_ref = None
-        else:
-            cpmk_ref_bersih = str(cpmk_ref_raw).strip()
-            if cpmk_ref_bersih in cpmk_ref_valid:
-                cpmk_ref = cpmk_ref_bersih
-            else:
-                daftar_peringatan.append(
-                    f"Minggu {m} - CPMK Ref: \u201c{cpmk_ref_bersih}\u201d tidak dikenali, dikosongkan"
-                )
-                cpmk_ref = None
+        if isinstance(cpmk_ref_raw, str) and cpmk_ref_raw.strip() == "-":
+            cpmk_ref_raw = ""  # "-" adalah penanda kosong bawaan template - bukan nilai tidak dikenal
         data[m] = {
             "sub_cpmk_desc": _teks_aman(row["Sub-CPMK"]),
-            "cpmk_ref": cpmk_ref,
+            "cpmk_ref": _normalisasi_multi(cpmk_ref_raw, CPMK_REF_OPTIONS, "CPMK Ref", m, daftar_peringatan),
             "bloom": _normalisasi_multi(row["Bloom"], BLOOM_LEVELS, "Bloom", m, daftar_peringatan),
             "indikator": _teks_aman(row["Indikator"]),
             "bentuk_asesmen": _teks_aman(row["Bentuk Asesmen"]),
@@ -550,7 +542,7 @@ def simpan_progres_button(key_suffix, primary=False, label="💾 Simpan Progres 
     Membaca client/mk_row/pengguna dari scope global - sama seperti pola
     get_komponen_issues() di atas terhadap session_state."""
     status_saat_ini = st.session_state.get("_rps_status") or "draft"
-    if status_saat_ini not in ("draft", "ditolak"):
+    if status_saat_ini not in ("draft", "ditolak") or st.session_state.get("_rps_dikunci_admin"):
         return
     if st.button(label, key=f"save_progres_{key_suffix}",
                  type="primary" if primary else "secondary", use_container_width=True):
@@ -589,6 +581,9 @@ def auto_save_fragment():
     - status sedang tidak bisa diedit (diajukan/disetujui/divalidasi) - sama
       seperti syarat simpan_progres_button, supaya tidak mencoba menyimpan
       sesuatu yang memang akan ditolak RLS database
+    - RPS ini sedang dikunci Admin (dikunci_admin) - supaya kunci Admin
+      benar-benar berlaku, bukan cuma menyembunyikan tombol Simpan manual
+      sementara auto-save tetap diam-diam jalan tiap 30 detik
     - isi RPS PERSIS SAMA dengan penyimpanan terakhir (dicek lewat hash) -
       supaya tidak membuat baris riwayat perubahan baru terus-menerus tanpa
       perubahan berarti (tabel rps_riwayat dicatat otomatis oleh trigger
@@ -598,7 +593,7 @@ def auto_save_fragment():
     sedang fokus mengetik dengan popup setiap menit.
     """
     status_saat_ini = st.session_state.get("_rps_status") or "draft"
-    if status_saat_ini not in ("draft", "ditolak"):
+    if status_saat_ini not in ("draft", "ditolak") or st.session_state.get("_rps_dikunci_admin"):
         return
     data = state_to_rps_data()
     current_hash = _hash_rps_data(data)
@@ -642,6 +637,19 @@ def apply_rps_data_to_state(data):
         v["bloom"] = _normalisasi_multi(", ".join(v.get("bloom") or []), BLOOM_LEVELS, "Bloom", k, _abaikan_saat_muat)
         v["metode"] = _normalisasi_multi(", ".join(v.get("metode") or []), METODE_OPTIONS, "Metode", k, _abaikan_saat_muat)
         v["bentuk"] = _normalisasi_multi(", ".join(v.get("bentuk") or []), BENTUK_OPTIONS, "Bentuk Online", k, _abaikan_saat_muat)
+        # cpmk_ref: RPS LAMA (sebelum fitur "boleh lebih dari satu CPMK per
+        # minggu" ini ada) menyimpannya sebagai SATU string ("CPMK-3") atau
+        # None - migrasi otomatis jadi list dulu (bungkus dengan [] kalau
+        # masih string tunggal) sebelum divalidasi dengan pola yang sama
+        # seperti bloom/metode/bentuk di atas.
+        cpmk_ref_mentah = v.get("cpmk_ref")
+        if cpmk_ref_mentah is None:
+            cpmk_ref_mentah = []
+        elif not isinstance(cpmk_ref_mentah, list):
+            cpmk_ref_mentah = [cpmk_ref_mentah]
+        v["cpmk_ref"] = _normalisasi_multi(
+            ", ".join(cpmk_ref_mentah), CPMK_REF_OPTIONS, "CPMK Ref", k, _abaikan_saat_muat,
+        )
         # Sama seperti bloom/metode/bentuk di atas - pastikan field teks
         # bebas ini juga tetap string (bukan angka/NaN yang mungkin sempat
         # kesimpan sebelum _teks_aman ada), supaya tidak crash saat dipotong
@@ -674,47 +682,72 @@ def apply_rps_data_to_state(data):
 # Simpan / muat progres, format Excel (bukan JSON, supaya bisa dibuka & dicek
 # manual oleh dosen di Excel biasa)
 # --------------------------------------------------------------------------
+_KARAKTER_ILEGAL_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _bersihkan_untuk_excel(value):
+    """Buang karakter kontrol yang TIDAK SAH di file XLSX menurut aturan
+    XML 1.0 (openpyxl akan melempar IllegalCharacterError dan menggagalkan
+    SELURUH unduhan kalau salah satu isian mengandung karakter semacam ini -
+    biasanya tidak sengaja ikut tertempel dari PDF/sumber lain, tidak
+    terlihat kasat mata sama sekali di layar). Sengaja TIDAK memakai
+    openpyxl.cell.cell.ILLEGAL_CHARACTERS_RE langsung - itu detail internal
+    yang lokasinya bisa berbeda antar versi openpyxl (server memakai Python
+    3.14, environment pengujian ini 3.12) - pola regex-nya disalin manual
+    di sini supaya tidak bergantung pada detail internal yang bisa berubah.
+    Cuma berlaku untuk nilai teks - angka/None dibiarkan apa adanya."""
+    if isinstance(value, str):
+        return _KARAKTER_ILEGAL_XLSX.sub("", value)
+    return value
+
+
+def _append_bersih(ws, values):
+    """Sama seperti ws.append(values), tapi setiap nilai teks dibersihkan
+    dulu dari karakter kontrol ilegal - lihat _bersihkan_untuk_excel()."""
+    ws.append([_bersihkan_untuk_excel(v) for v in values])
+
+
 def serialize_progress_excel(mk_row):
     wb = Workbook()
 
     ws_meta = wb.active
     ws_meta.title = "Meta"
-    ws_meta.append(["Key", "Value"])
-    ws_meta.append(["prodi_sel", st.session_state.prodi_sel])
-    ws_meta.append(["mk_sel", st.session_state.mk_sel])
+    _append_bersih(ws_meta, ["Key", "Value"])
+    _append_bersih(ws_meta, ["prodi_sel", st.session_state.prodi_sel])
+    _append_bersih(ws_meta, ["mk_sel", st.session_state.mk_sel])
     info = st.session_state.info_umum
     for key in ("dosen_koordinator", "dosen_pengampu", "deskripsi_mk",
                 "rumpun_mk", "nama_kaprodi",
                 "nama_biro_pjm", "tanggal_dokumen", "level_ai", "deskripsi_ai"):
-        ws_meta.append([key, info.get(key, "")])
+        _append_bersih(ws_meta, [key, info.get(key, "")])
 
     ws_cpl = wb.create_sheet("CPL_Selected")
-    ws_cpl.append(["Kode CPL"])
+    _append_bersih(ws_cpl, ["Kode CPL"])
     for k in st.session_state.cpl_selected:
-        ws_cpl.append([k])
+        _append_bersih(ws_cpl, [k])
 
     ws_cpmk = wb.create_sheet("CPMK")
-    ws_cpmk.append(["No", "Kode CPL", "Deskripsi"])
+    _append_bersih(ws_cpmk, ["No", "Kode CPL", "Deskripsi"])
     for i in range(1, 6):
         c = st.session_state.cpmk_data[i]
-        ws_cpmk.append([i, c["cpl_kode"], c["deskripsi"]])
+        _append_bersih(ws_cpmk, [i, c["cpl_kode"], c["deskripsi"]])
 
     ws_komp = wb.create_sheet("Komponen")
-    ws_komp.append(["CPMK"] + KATEGORI_PENILAIAN)
+    _append_bersih(ws_komp, ["CPMK"] + KATEGORI_PENILAIAN)
     for i in range(1, 6):
         row_persen = st.session_state.komponen_data.get(i) or {}
-        ws_komp.append([f"CPMK-{i}"] + [row_persen.get(kat, 0) for kat in KATEGORI_PENILAIAN])
+        _append_bersih(ws_komp, [f"CPMK-{i}"] + [row_persen.get(kat, 0) for kat in KATEGORI_PENILAIAN])
 
     ws_ref = wb.create_sheet("Referensi")
-    ws_ref.append(["No", "Sitasi"])
+    _append_bersih(ws_ref, ["No", "Sitasi"])
     for i, ref in enumerate(st.session_state.referensi_data, start=1):
-        ws_ref.append([i, ref["sitasi"]])
+        _append_bersih(ws_ref, [i, ref["sitasi"]])
 
     ws_prt = wb.create_sheet("Pertemuan")
     df = pertemuan_to_df(st.session_state.pertemuan_data)
-    ws_prt.append(list(df.columns))
+    _append_bersih(ws_prt, list(df.columns))
     for row in df.itertuples(index=False):
-        ws_prt.append(list(row))
+        _append_bersih(ws_prt, list(row))
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -938,30 +971,6 @@ with st.sidebar:
         st.session_state.prodi_sel = prodi_sel
         st.session_state.mk_sel = mk_sel_name
 
-        # Penyesuaian: Dosen Pengembang RPS (Koordinator), Nama Kaprodi, dan
-        # Nama Ka. BPM TIDAK LAGI diketik manual atau diambil dari file
-        # config/pejabat.txt - sekarang ditarik LANGSUNG dari database:
-        # koordinator = akun yang sedang login (cuma koordinator MK ini yang
-        # bisa sampai ke titik ini, dijamin RLS), Kaprodi & BPM lewat RPC
-        # get_kaprodi_nama()/get_bpm_nama() (lihat db_master.py). Kalau belum
-        # ada yang ditetapkan sebagai Kaprodi/BPM di database, jatuh ke
-        # config/pejabat.txt dulu sebagai fallback masa transisi, baru kosong
-        # kalau itu juga tidak ada.
-        nama_saya = pengguna.get("nama") or pengguna.get("email") or ""
-        st.session_state.info_umum["dosen_koordinator"] = nama_saya
-        # (nama_koordinator - field duplikat identik dengan dosen_koordinator
-        # di atas, sisa dari pdf_export.py lama yang sudah tidak dipakai -
-        # dihapus, supaya tidak ada dua field yang harus selalu disamakan
-        # manual dan berisiko suatu saat kepleset beda nilai)
-
-        pejabat_cfg = load_pejabat_config()
-        nama_kaprodi_db = get_kaprodi_nama(client, prodi_id)
-        st.session_state.info_umum["nama_kaprodi"] = nama_kaprodi_db or pejabat_cfg["kaprodi"].get(prodi_sel, "")
-        nama_bpm_db = get_bpm_nama(client)
-        st.session_state.info_umum["nama_biro_pjm"] = nama_bpm_db or pejabat_cfg["kabiro"]
-
-        st.session_state.info_umum["rumpun_mk"] = rumpun_mk_val
-
         # Fase 4: kalau RPS untuk Mata Kuliah ini sudah pernah disimpan
         # sebelumnya (oleh Dosen yang sama), muat isinya - menang dibanding
         # auto-isi default di atas.
@@ -973,12 +982,53 @@ with st.sidebar:
             st.session_state["_rps_catatan"] = existing.get("catatan_kaprodi")
             st.session_state["_rps_catatan_bpm"] = existing.get("catatan_bpm")
             st.session_state["_rps_diajukan_pada"] = existing.get("diajukan_pada")
+            st.session_state["_rps_dikunci_admin"] = bool(existing.get("dikunci_admin"))
         else:
             st.session_state["_rps_id"] = None
             st.session_state["_rps_status"] = None
             st.session_state["_rps_catatan"] = None
             st.session_state["_rps_catatan_bpm"] = None
             st.session_state["_rps_diajukan_pada"] = None
+            st.session_state["_rps_dikunci_admin"] = False
+
+        # Penyesuaian: Dosen Pengembang RPS (Koordinator), Nama Kaprodi, Nama
+        # Ka. BPM, dan Rumpun MK adalah field OTOMATIS/TIDAK BISA DIEDIT
+        # MANUAL (disabled di UI) - makanya SENGAJA ditimpa dengan nilai
+        # TERKINI di sini, SETELAH apply_rps_data_to_state di atas (supaya
+        # nilai FRESH ini yang menang, bukan snapshot lama yang "membeku"
+        # sejak RPS ini terakhir disimpan - mis. kalau koordinatornya sudah
+        # diganti Kaprodi, atau pejabat Kaprodi/BPM sudah berganti, SETELAH
+        # RPS ini terakhir disimpan).
+        #
+        # dosen_koordinator KHUSUS diambil dari koordinator_user_id/
+        # koordinator_nip Mata Kuliah ini (get_koordinator_nama) - BUKAN
+        # dari akun yang KEBETULAN sedang login (pengguna) seperti
+        # sebelumnya - soalnya Kaprodi/Admin bisa saja membuka Mata Kuliah
+        # Dosen LAIN untuk memeriksa, dan nama mereka sendiri TIDAK BOLEH
+        # tertulis sebagai "pengembang RPS"-nya Dosen itu.
+        st.session_state.info_umum["dosen_koordinator"] = get_koordinator_nama(
+            client, new_mk_row.get("koordinator_user_id"), new_mk_row.get("koordinator_nip"),
+        )
+        pejabat_cfg = load_pejabat_config()
+        nama_kaprodi_db = get_kaprodi_nama(client, prodi_id)
+        st.session_state.info_umum["nama_kaprodi"] = nama_kaprodi_db or pejabat_cfg["kaprodi"].get(prodi_sel, "")
+        nama_bpm_db = get_bpm_nama(client)
+        st.session_state.info_umum["nama_biro_pjm"] = nama_bpm_db or pejabat_cfg["kabiro"]
+        st.session_state.info_umum["rumpun_mk"] = rumpun_mk_val
+
+        # Sinkronkan juga WIDGET TAMPILANNYA secara langsung (bukan cuma
+        # dict info_umum) - keempat widget ini "disabled" dengan key yang
+        # STABIL per Mata Kuliah, jadi kalau Mata Kuliah ini sempat dibuka
+        # sebelumnya dalam sesi browser yang SAMA, argumen value= yang baru
+        # akan DIABAIKAN Streamlit tanpa langkah ini (gotcha yang sama
+        # seperti sinkronkan_widget_pertemuan() - lihat penjelasan di
+        # sana) - field akan terlihat "nyangkut"/kosong di nilai kunjungan
+        # PERTAMA, bukan yang sekarang. Ini persis penyebab laporan "Dosen
+        # Pengembang RPS hilang dari Info Umum".
+        st.session_state[mk_key("dosen_koordinator_display")] = st.session_state.info_umum["dosen_koordinator"]
+        st.session_state[mk_key("nama_kaprodi_display")] = st.session_state.info_umum["nama_kaprodi"]
+        st.session_state[mk_key("nama_biro_pjm_display")] = st.session_state.info_umum["nama_biro_pjm"]
+        st.session_state[mk_key("rumpun_mk_display")] = st.session_state.info_umum["rumpun_mk"]
 
         st.rerun()
 
@@ -999,7 +1049,13 @@ with st.sidebar:
         "disetujui": "✅ Disetujui Kaprodi (menunggu BPM)",
         "ditolak": "↩️ Ditolak", "divalidasi": "✅ Tervalidasi (Final)",
     }
-    bisa_edit = status_saat_ini in ("draft", "ditolak")
+    bisa_edit = status_saat_ini in ("draft", "ditolak") and not st.session_state.get("_rps_dikunci_admin")
+
+    if st.session_state.get("_rps_dikunci_admin"):
+        st.error(
+            "🔒 RPS ini dikunci oleh Admin - tidak bisa diedit sementara waktu. "
+            "Hubungi Admin kalau ini tidak seharusnya terjadi."
+        )
 
     if st.session_state.get("_rps_id"):
         st.caption(f"Status: {status_label.get(status_saat_ini, status_saat_ini)} · tersimpan di database")
@@ -1252,7 +1308,8 @@ with tab_pertemuan:
         st.caption(
             "Unduh templatnya, isi di Excel (lebih leluasa untuk isi banyak baris sekaligus), "
             "lalu unggah kembali untuk mengisi otomatis ke-16 pertemuan. Kolom **CPMK Ref** diisi "
-            "'CPMK-1' s/d 'CPMK-5' (atau '-' untuk UTS/UAS); kolom Bloom/Metode/Bentuk Online "
+            "'CPMK-1' s/d 'CPMK-5' (atau '-' untuk UTS/UAS) - boleh lebih dari satu, dipisah koma "
+            "(mis. 'CPMK-1, CPMK-3'); kolom Bloom/Metode/Bentuk Online juga "
             "dipisah koma kalau lebih dari satu - **harus persis salah satu kode yang sah** "
             f"(Bloom: {', '.join(BLOOM_LEVELS)} · Metode: {', '.join(METODE_OPTIONS)} · "
             f"Bentuk Online: {', '.join(BENTUK_OPTIONS)}), besar-kecil huruf bebas tapi ejaannya "
@@ -1298,7 +1355,6 @@ with tab_pertemuan:
         "Sub-CPMK diisi langsung per minggu, sertakan CPMK mana yang dirujuk lewat **CPMK Ref** "
         "(kode CPMK otomatis ditambahkan dalam kurung di akhir kalimat Sub-CPMK pada hasil ekspor)."
     )
-    cpmk_ref_options = ["-"] + [f"CPMK-{i}" for i in range(1, 6)]
     for m in range(1, N_MINGGU + 1):
         p = st.session_state.pertemuan_data[m]
         is_ujian = m in (8, 16)
@@ -1310,17 +1366,15 @@ with tab_pertemuan:
                     f"Minggu ujian ({'UTS' if m == 8 else 'UAS'}) - field Sub-CPMK sudah "
                     "diisi teks standar, boleh diedit/ditambah cakupan materinya."
                 )
-            current_ref = p["cpmk_ref"] or "-"
-            ref_choice = st.selectbox(
-                "CPMK Ref", cpmk_ref_options,
-                index=cpmk_ref_options.index(current_ref) if current_ref in cpmk_ref_options else 0,
+            p["cpmk_ref"] = st.multiselect(
+                "CPMK Ref", CPMK_REF_OPTIONS, default=p["cpmk_ref"],
                 key=mk_key(f"prt_cpmkref_{m}"),
+                help="Boleh pilih lebih dari satu kalau minggu ini merujuk beberapa CPMK sekaligus.",
             )
-            p["cpmk_ref"] = None if ref_choice == "-" else ref_choice
-            if p["cpmk_ref"]:
-                idx_cpmk_disp = int(p["cpmk_ref"].split("-")[1])
+            for ref in p["cpmk_ref"]:
+                idx_cpmk_disp = int(ref.split("-")[1])
                 cpmk_desc_disp = st.session_state.cpmk_data[idx_cpmk_disp]["deskripsi"]
-                st.caption(f"📖 **{p['cpmk_ref']}**: {cpmk_desc_disp or '(belum diisi)'}")
+                st.caption(f"📖 **{ref}**: {cpmk_desc_disp or '(belum diisi)'}")
 
             p["sub_cpmk_desc"] = st.text_area("Sub-CPMK", p["sub_cpmk_desc"], key=mk_key(f"prt_sub_{m}"), height=70)
 
@@ -1334,8 +1388,10 @@ with tab_pertemuan:
                             try:
                                 cpmk_desc = ""
                                 if p["cpmk_ref"]:
-                                    idx_cpmk = int(p["cpmk_ref"].split("-")[1])
-                                    cpmk_desc = st.session_state.cpmk_data[idx_cpmk]["deskripsi"]
+                                    cpmk_desc = " ".join(
+                                        st.session_state.cpmk_data[int(ref.split("-")[1])]["deskripsi"] or ""
+                                        for ref in p["cpmk_ref"]
+                                    )
                                 model_name = st.session_state.get("gemini_model_effective") or "gemini-2.0-flash"
                                 suggestion = get_ai_suggestion(
                                     mk_row["Nama Mata Kuliah"], st.session_state.info_umum.get("deskripsi_mk", ""),

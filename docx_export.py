@@ -360,7 +360,7 @@ def fill_pertemuan_table(document, pertemuan_data, sks):
         # urutan kolom BERSIH pada template baru (7 kolom, tanpa duplikasi gridSpan
         # seperti template lama): 0=Minggu 1=Sub-CPMK 2=Bloom 3=Indikator
         # 4=Bentuk Asesmen 5=Metode+Daring(gabungan, + Keterangan Waktu) 6=Materi
-        sub_text = with_code(p.get("sub_cpmk_desc", ""), p.get("cpmk_ref"))
+        sub_text = with_code(p.get("sub_cpmk_desc", ""), ", ".join(p.get("cpmk_ref") or []))
         set_cell_text(cells[1], sub_text)
         set_cell_text(cells[2], ", ".join(p.get("bloom", [])))
         set_cell_text(cells[3], p.get("indikator", ""))

@@ -405,6 +405,37 @@ def get_bpm_nama(client):
     return None
 
 
+def get_koordinator_nama(client, koordinator_user_id, koordinator_nip):
+    """Nama koordinator SAAT INI untuk satu Mata Kuliah - lewat akun aktif
+    kalau ada (koordinator_user_id), lewat data pra-daftar kalau belum
+    bikin akun (koordinator_nip), atau string kosong kalau belum ada
+    koordinator sama sekali.
+
+    PENTING dipakai untuk field "Dosen Pengembang RPS (Koordinator)" di
+    form RPS - field itu HARUS selalu mencerminkan siapa koordinator MK
+    ini SEKARANG (dari data master), BUKAN diambil dari akun yang KEBETULAN
+    sedang login membuka halaman ini - Kaprodi/Admin bisa saja membuka
+    Mata Kuliah Dosen lain untuk memeriksa, dan nama mereka TIDAK BOLEH
+    tertulis sebagai "pengembang RPS"-nya."""
+    if koordinator_user_id:
+        try:
+            resp = client.table("pengguna").select("nama, email").eq("id", koordinator_user_id).execute()
+            rows = resp.data or []
+            if rows:
+                return rows[0].get("nama") or rows[0].get("email") or ""
+        except Exception:
+            pass
+    if koordinator_nip:
+        try:
+            resp = client.table("whitelist_pendaftaran").select("nama").eq("nip", koordinator_nip).execute()
+            rows = resp.data or []
+            if rows:
+                return rows[0].get("nama") or ""
+        except Exception:
+            pass
+    return ""
+
+
 # --------------------------------------------------------------------------
 # Kelola pengguna (Panel Admin) - butuh policy "hanya admin bisa update
 # pengguna" dari Fase 2 (sudah ada, tidak perlu policy baru).
