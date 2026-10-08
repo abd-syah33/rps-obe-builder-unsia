@@ -42,6 +42,8 @@ import httpx
 import streamlit as st
 from supabase import ClientOptions, create_client
 
+from cache_scope import set_cache_scope
+
 from supabase_config import load_supabase_config
 
 
@@ -269,6 +271,8 @@ def require_login():
 
     user = user_resp.user
     pengguna = _fetch_pengguna(client, user.id)
+    if pengguna is not None:
+        set_cache_scope(pengguna)
     if pengguna is None:
         st.error(
             "Berhasil masuk, tapi profil belum ada di tabel `pengguna` (harusnya "

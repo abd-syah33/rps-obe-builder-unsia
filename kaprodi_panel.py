@@ -8,6 +8,7 @@ from db_master import get_tahun_kurikulum_terbaru, index_tahun_default, list_tah
 from rps_store import (
     buka_kembali_rps,
     list_diajukan,
+    segarkan_cache_rps,
     list_divalidasi_by_prodi,
     setujui_rps,
     tolak_rps,
@@ -136,7 +137,7 @@ def render_review_rps(client):
                     try:
                         setujui_rps(client, row["id"], catatan.strip() or None)
                         st.session_state["_pesan_review_rps"] = "RPS disetujui - lanjut ke tahap validasi BPM."
-                        list_diajukan.clear()
+                        segarkan_cache_rps()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Gagal menyetujui: {e}")
@@ -148,7 +149,7 @@ def render_review_rps(client):
                         try:
                             tolak_rps(client, row["id"], catatan.strip())
                             st.session_state["_pesan_review_rps"] = "RPS ditolak, catatan tersimpan untuk Dosen."
-                            list_diajukan.clear()
+                            segarkan_cache_rps()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Gagal menolak: {e}")
@@ -214,6 +215,7 @@ def render_buka_kembali(client, prodi_id):
                     ):
                         try:
                             buka_kembali_rps(client, row["id"], catatan_alasan.strip() or None)
+                            segarkan_cache_rps()
                             st.session_state["_pesan_buka_kembali"] = (
                                 "RPS dibuka kembali - sekarang berstatus Draft dan bisa diedit koordinatornya."
                             )
