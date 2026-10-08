@@ -15,6 +15,6 @@
 # yang asli. File config/supabase.txt (BUKAN yang .example ini) sudah masuk
 # .gitignore - tidak akan ikut ter-commit ke git.
 
-SUPABASE_URL=https://fpzppdhzxtsjxztycnhj.supabase.co
-SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwenBwZGh6eHRzanh6dHljbmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyNzIzMjEsImV4cCI6MjEwMjg0ODMyMX0.sccQj3hFcFYlJEVJmXcXV5udS4h9-TwGUX2FzdPR9zA
-SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwenBwZGh6eHRzanh6dHljbmhqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NzI3MjMyMSwiZXhwIjoyMTAyODQ4MzIxfQ.Znmj7uSGuBEsYXi1AL7Aq3kiCkb00t-ITUMtPn51qpQ
+SUPABASE_URL=https://xxxxxxxxxxxxxxxxxxxx.supabase.co
+SUPABASE_ANON_KEY=isi-anon-key-di-sini
+SUPABASE_SERVICE_ROLE_KEY=isi-service-role-key-di-sini
