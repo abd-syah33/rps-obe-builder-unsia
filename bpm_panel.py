@@ -11,7 +11,7 @@ lagi dari awal (lihat catatan di ajukan_rps() pada sql/schema.sql)."""
 import streamlit as st
 
 from db_master import load_master_db, list_prodi_db
-from rps_store import list_bpm_queue, validasi_bpm_rps, tolak_bpm_rps
+from rps_store import list_bpm_queue, validasi_bpm_rps, tolak_bpm_rps, segarkan_cache_rps
 from rps_preview import render_rps_preview
 from stats_ui import render_statistik_institusi
 
@@ -120,7 +120,7 @@ def render_validasi_queue(client):
                     try:
                         validasi_bpm_rps(client, row["id"], catatan.strip() or None)
                         st.session_state["_pesan_bpm"] = "RPS divalidasi - sekarang final dan muncul di RPS Tervalidasi."
-                        list_bpm_queue.clear()
+                        segarkan_cache_rps()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Gagal memvalidasi: {e}")
@@ -132,7 +132,7 @@ def render_validasi_queue(client):
                         try:
                             tolak_bpm_rps(client, row["id"], catatan.strip())
                             st.session_state["_pesan_bpm"] = "RPS ditolak, langsung kembali ke Dosen untuk direvisi."
-                            list_bpm_queue.clear()
+                            segarkan_cache_rps()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Gagal menolak: {e}")

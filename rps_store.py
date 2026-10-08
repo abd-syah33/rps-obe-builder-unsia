@@ -13,6 +13,8 @@ di app.py untuk konversi ke/dari bentuk ini.
 
 import streamlit as st
 
+from cache_scope import cache_scope
+
 
 def load_rps(client, mata_kuliah_id):
     """Satu Mata Kuliah = satu dokumen RPS (dimiliki siapa pun yang SAAT INI
@@ -65,8 +67,12 @@ def list_my_rps(_client, user_id):
     return resp.data or []
 
 
+def load_riwayat(client, rps_id, limit=10):
+    return _load_riwayat_cached(client, cache_scope(), rps_id, limit)
+
+
 @st.cache_data(ttl=15)
-def load_riwayat(_client, rps_id, limit=10):
+def _load_riwayat_cached(_client, scope, rps_id, limit):
     """Daftar snapshot riwayat perubahan untuk satu RPS (dari tabel
     rps_riwayat, diisi otomatis lewat trigger - lihat sql/schema.sql FASE 4)."""
     resp = (
@@ -101,8 +107,12 @@ def tolak_rps(client, rps_id, catatan):
     client.rpc("tolak_rps", {"target_rps_id": rps_id, "catatan": catatan}).execute()
 
 
+def list_diajukan(client):
+    return _list_diajukan_cached(client, cache_scope())
+
+
 @st.cache_data(ttl=15)
-def list_diajukan(_client):
+def _list_diajukan_cached(_client, scope):
     """RPS berstatus 'diajukan' yang boleh dilihat pengguna yang login saat
     ini - RLS otomatis membatasi ke RPS di prodi yang diampu untuk Kaprodi,
     atau semua untuk Admin (lihat policy "kaprodi & admin baca rps"). Nama
@@ -141,8 +151,12 @@ def list_divalidasi(_client):
 # Penyesuaian: Role BPM - validasi tahap kedua setelah Kaprodi menyetujui,
 # se-institusi (semua Prodi, tidak dibatasi seperti Kaprodi).
 # --------------------------------------------------------------------------
+def list_bpm_queue(client):
+    return _list_bpm_queue_cached(client, cache_scope())
+
+
 @st.cache_data(ttl=15)
-def list_bpm_queue(_client):
+def _list_bpm_queue_cached(_client, scope):
     """RPS berstatus 'disetujui' (menunggu validasi BPM) - RLS otomatis
     membatasi ke akun ber-role bpm saja (lihat policy "bpm baca rps antrian
     & riwayat"), TANPA filter Prodi (BPM se-institusi)."""
@@ -154,6 +168,17 @@ def list_bpm_queue(_client):
         .execute()
     )
     return resp.data or []
+
+
+def segarkan_cache_rps():
+    """Buang semua cache daftar/statistik RPS setelah ada perubahan status
+    (ajukan, tarik, setujui, tolak, validasi, buka kembali), supaya Dosen,
+    Kaprodi, BPM, dan Admin langsung melihat keadaan terbaru, tidak menunggu
+    TTL habis. Dipanggil dari tombol-tombol transisi status."""
+    from stats_ui import get_rps_progress_raw  # impor lokal: hindari impor melingkar
+    for fn in (list_my_rps, _load_riwayat_cached, _list_diajukan_cached,
+               list_divalidasi, _list_bpm_queue_cached, get_rps_progress_raw):
+        fn.clear()
 
 
 def validasi_bpm_rps(client, rps_id, catatan=None):
@@ -222,3 +247,8 @@ def set_kunci_admin(client, rps_id, kunci):
     lihat set_kunci_admin() di sql/schema.sql. Berlaku APA PUN status
     RPS-nya saat ini."""
     client.rpc("set_kunci_admin", {"target_rps_id": rps_id, "kunci": kunci}).execute()
+
+# Kompatibilitas: pemanggil lama memakai list_diajukan.clear() / list_bpm_queue.clear().
+list_diajukan.clear = _list_diajukan_cached.clear
+list_bpm_queue.clear = _list_bpm_queue_cached.clear
+load_riwayat.clear = _load_riwayat_cached.clear

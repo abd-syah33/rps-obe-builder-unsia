@@ -49,7 +49,7 @@ from db_master import (
 from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
 from bpm_panel import render_bpm_panel
-from rps_store import load_rps, save_rps, ajukan_rps, tarik_pengajuan_rps
+from rps_store import load_rps, save_rps, ajukan_rps, tarik_pengajuan_rps, segarkan_cache_rps
 from rps_saya import render_rps_saya
 from rps_browse import render_rps_tervalidasi
 
@@ -1099,6 +1099,7 @@ with st.sidebar:
             if st.button("↩️ Tarik Pengajuan", key="tarik_btn", use_container_width=True):
                 try:
                     tarik_pengajuan_rps(client, st.session_state["_rps_id"])
+                    segarkan_cache_rps()
                     st.session_state["_rps_status"] = "draft"
                     st.session_state["_rps_diajukan_pada"] = None
                     st.session_state["_pesan_sidebar_rps"] = "Pengajuan ditarik, kembali ke status Draft dan bisa diedit lagi."
@@ -1611,6 +1612,7 @@ with tab_export:
                     else:
                         try:
                             ajukan_rps(client, st.session_state["_rps_id"])
+                            segarkan_cache_rps()
                             st.session_state["_rps_status"] = "diajukan"
                             st.session_state["_rps_catatan"] = None
                             st.session_state["_rps_catatan_bpm"] = None

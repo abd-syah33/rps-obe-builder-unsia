@@ -24,6 +24,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from cache_scope import cache_scope
+
 STATUS_URUTAN = ["belum", "draft", "diajukan", "disetujui", "ditolak", "divalidasi"]
 STATUS_LABEL = {
     "belum": "\u2b1c Belum Diisi",
@@ -121,8 +123,12 @@ def _chart_status_berkelompok(df, kolom_kategori):
     st.altair_chart(chart, use_container_width=True)
 
 
+def get_rps_progress_raw(client, prodi_id=None):
+    return _get_rps_progress_raw_cached(client, cache_scope(), prodi_id)
+
+
 @st.cache_data(ttl=30)
-def get_rps_progress_raw(_client, prodi_id=None):
+def _get_rps_progress_raw_cached(_client, scope, prodi_id):
     """Data mentah utk statistik: satu baris per Mata Kuliah, digabung ke
     status RPS-nya (kalau ada) dan info koordinator MENTAH (id/nip - belum
     di-resolve ke nama, lihat _nama_koordinator). prodi_id=None berarti
@@ -167,14 +173,22 @@ def get_rps_progress_raw(_client, prodi_id=None):
     ]
 
 
+def _peta_nama_pengguna(client):
+    return _peta_nama_pengguna_cached(client, cache_scope())
+
+
 @st.cache_data(ttl=30)
-def _peta_nama_pengguna(_client):
+def _peta_nama_pengguna_cached(_client, scope):
     resp = _client.table("pengguna").select("id, nama, email").execute()
     return {p["id"]: (p.get("nama") or p.get("email") or "-") for p in (resp.data or [])}
 
 
+def _peta_nama_whitelist(client):
+    return _peta_nama_whitelist_cached(client, cache_scope())
+
+
 @st.cache_data(ttl=30)
-def _peta_nama_whitelist(_client):
+def _peta_nama_whitelist_cached(_client, scope):
     resp = _client.table("whitelist_pendaftaran").select("nip, nama").execute()
     return {w["nip"]: w["nama"] for w in (resp.data or [])}
 
@@ -331,3 +345,5 @@ def render_statistik_institusi(client, prodi_rows):
     prodi_pilih = st.selectbox("Pilih Program Studi", nama_prodi_opsi, key="stats_institusi_prodi_pilih")
     rows_prodi = [r for r in rows if r["prodi_nama"] == prodi_pilih]
     render_tabel_per_dosen(client, rows_prodi, tampilkan_peringatan_koordinator=True)
+
+get_rps_progress_raw.clear = _get_rps_progress_raw_cached.clear
