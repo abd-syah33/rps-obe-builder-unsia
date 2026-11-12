@@ -1,0 +1,18 @@
+# Layanan ekspor RPS Builder v2 di VPS. Jalankan dari akar repo:
+#   sudo docker compose -f export/compose.yaml --env-file /srv/rps-ekspor/.env up -d --build
+# /srv/rps-ekspor/.env (root-only, chmod 600) berisi EKSPOR_TOKEN=... (sama dengan di Vercel).
+name: rps-ekspor
+services:
+  ekspor:
+    build: { context: .., dockerfile: export/Dockerfile }
+    image: rps-ekspor
+    restart: unless-stopped
+    env_file: /srv/rps-ekspor/.env
+    ports: ["127.0.0.1:8098:8000"]
+    mem_limit: 320m          # diukur 12 Nov 2026: idle 77 MB, puncak 240 MB (5 PDF bersamaan)
+    memswap_limit: 320m
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    volumes: ["/srv/rps-ekspor/home:/home/ekspor"]   # profil LibreOffice + cache PDF di disk, bukan RAM
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
