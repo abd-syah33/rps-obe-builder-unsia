@@ -50,6 +50,7 @@ from admin_panel import render_admin_panel
 from kaprodi_panel import render_kaprodi_panel
 from bpm_panel import render_bpm_panel
 from rps_store import load_rps, save_rps, ajukan_rps, tarik_pengajuan_rps, segarkan_cache_rps
+from validasi_rps import LEVEL_AI_PILIHAN, MIN_DESKRIPSI_AI, masalah_penggunaan_ai
 from rps_saya import render_rps_saya
 from rps_browse import render_rps_tervalidasi
 
@@ -1484,21 +1485,29 @@ with tab_pertemuan:
 with tab_ref:
     simpan_progres_button("daftar_pustaka")
     st.divider()
-    st.subheader("Level Penggunaan AI")
-    st.caption("Opsional, boleh dikosongkan - tidak menghalangi pengajuan ke Kaprodi.")
+    st.subheader("Level Penggunaan AI *")
+    st.caption(
+        f"Wajib diisi sebelum RPS diajukan ke Kaprodi: pilih Level dan tulis Deskripsi "
+        f"(minimal {MIN_DESKRIPSI_AI} karakter). Untuk \"Tanpa AI\", tuliskan alasannya."
+    )
     info = st.session_state.info_umum
-    pilihan_ai = ["(belum dipilih)", "Tanpa AI", "Assisted AI", "Free AI"]
+    pilihan_ai = ["(belum dipilih)"] + LEVEL_AI_PILIHAN
     current_ai = info.get("level_ai") or "(belum dipilih)"
     level_ai_pilih = st.selectbox(
-        "Level Penggunaan AI", pilihan_ai,
+        "Level Penggunaan AI *", pilihan_ai,
         index=pilihan_ai.index(current_ai) if current_ai in pilihan_ai else 0,
         key=mk_key("level_ai"),
     )
     info["level_ai"] = "" if level_ai_pilih == "(belum dipilih)" else level_ai_pilih
     info["deskripsi_ai"] = st.text_area(
-        "Deskripsi Penggunaan AI", info.get("deskripsi_ai", ""), key=mk_key("deskripsi_ai"),
+        "Deskripsi Penggunaan AI *", info.get("deskripsi_ai", ""), key=mk_key("deskripsi_ai"),
         help="Jelaskan bagaimana/di bagian mana AI dipakai (atau kenapa tidak dipakai) dalam penyusunan RPS/pembelajaran ini.",
     )
+    masalah_ai = masalah_penggunaan_ai(info)
+    if masalah_ai:
+        st.warning("Belum lengkap: " + "; ".join(masalah_ai) + ".")
+    else:
+        st.success("Level dan Deskripsi Penggunaan AI sudah lengkap.")
 
     st.divider()
     st.subheader("Daftar Pustaka")
@@ -1527,7 +1536,7 @@ with tab_nilai:
 
     for kategori in KATEGORI_PENILAIAN:
         target = BOBOT_KATEGORI.get(kategori, 0)
-        st.markdown(f"**{kategori}** — bobot total {target}%")
+        st.markdown(f"**{kategori}** (bobot total {target}%)")
         cols = st.columns(5)
         total_kategori = 0
         for i in range(1, 6):
@@ -1602,15 +1611,24 @@ with tab_export:
                     "✅ Ya, Ajukan Sekarang", key="konfirmasi_ajukan_btn",
                     use_container_width=True, type="primary",
                 ):
-                    issues = get_komponen_issues()
+                    issues = [f"Komponen Penilaian: {msg}" for msg in get_komponen_issues()]
+                    issues += [f"Daftar Pustaka: {msg}" for msg in masalah_penggunaan_ai(st.session_state.info_umum)]
                     if issues:
                         st.error(
-                            "Belum bisa diajukan - persentase Komponen Penilaian belum pas "
-                            "(cek tab 'Komponen Penilaian'):\n"
+                            "Belum bisa diajukan, lengkapi dulu:\n"
                             + "\n".join(f"- {msg}" for msg in issues)
                         )
                     else:
                         try:
+                            # Simpan dulu isian yang sedang tampil, supaya yang
+                            # diperiksa & dikirim ke Kaprodi sama persis dengan
+                            # yang dilihat Dosen (bukan versi auto-save terakhir,
+                            # yang bisa tertinggal sampai 30 detik).
+                            data_terkini = state_to_rps_data()
+                            saved = save_rps(client, mk_row["id"], pengguna["id"], data_terkini)
+                            if saved:
+                                st.session_state["_rps_id"] = saved["id"]
+                            st.session_state["_rps_last_saved_hash"] = _hash_rps_data(data_terkini)
                             ajukan_rps(client, st.session_state["_rps_id"])
                             segarkan_cache_rps()
                             st.session_state["_rps_status"] = "diajukan"

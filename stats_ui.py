@@ -142,7 +142,48 @@ def _get_rps_progress_raw_cached(_client, scope, prodi_id):
     kurikulum yang sedang berjalan (mis. 2026). Tiap Prodi dihitung
     tahun terbarunya SENDIRI-SENDIRI (bukan satu potongan tahun untuk
     semua Prodi), karena Prodi yang belum pindah kurikulum baru tidak
-    boleh ikut kepotong datanya."""
+    boleh ikut kepotong datanya.
+
+    Sumber data: fungsi database statistik_pengisian_rps() (Paket Perbaikan
+    1, BUG-02). Dulu tabel mata_kuliah + rps + pengguna dibaca langsung,
+    sehingga BPM (yang oleh RLS hanya boleh membaca RPS disetujui/divalidasi
+    dan tidak boleh membaca tabel pengguna) melihat RPS Draft/Diajukan
+    sebagai "Belum Diisi" dan nama koordinator tidak dikenali. Fungsi itu
+    hanya mengembalikan status + nama koordinator, bukan isi RPS. Kalau
+    fungsinya belum dipasang di database, jatuh balik ke cara lama."""
+    try:
+        resp = _client.rpc("statistik_pengisian_rps", {"target_prodi_id": prodi_id}).execute()
+        semua_baris = [{
+            "kode_mk": r["kode_mk"], "nama_mk": r["nama_mk"],
+            "prodi_nama": r.get("prodi_nama") or "-",
+            "tahun_kurikulum": r.get("tahun_kurikulum"),
+            "koordinator_user_id": r.get("koordinator_user_id"),
+            "koordinator_nip": r.get("koordinator_nip"),
+            "koordinator_nama": r.get("koordinator_nama"),
+            "status": r.get("status") or "belum",
+        } for r in (resp.data or [])]
+    except Exception as e:
+        # Fungsi belum dipasang (SQL Bagian A belum dijalankan) atau pemanggil
+        # tidak berwenang (mis. akun Kaprodi tanpa prodi): pakai cara lama,
+        # supaya perilakunya tidak lebih buruk dari sebelum perbaikan.
+        print(f"[stats_ui] statistik_pengisian_rps gagal, pakai cara lama: {e}")
+        semua_baris = _get_rps_progress_raw_lama(_client, prodi_id)
+
+    tahun_terbaru_per_prodi = {}
+    for r in semua_baris:
+        p, t = r["prodi_nama"], r["tahun_kurikulum"]
+        if t is not None and (p not in tahun_terbaru_per_prodi or t > tahun_terbaru_per_prodi[p]):
+            tahun_terbaru_per_prodi[p] = t
+
+    return [
+        r for r in semua_baris
+        if r["tahun_kurikulum"] == tahun_terbaru_per_prodi.get(r["prodi_nama"])
+    ]
+
+
+def _get_rps_progress_raw_lama(_client, prodi_id):
+    """Cara lama (baca tabel langsung, tunduk RLS) - hanya cadangan selama
+    sql/paket-perbaikan-1a-statistik.sql belum dijalankan."""
     query = _client.table("mata_kuliah").select(
         "kode_mk, nama_mk, prodi_id, tahun_kurikulum, koordinator_user_id, koordinator_nip, "
         "prodi(nama), rps(status)"
@@ -160,17 +201,7 @@ def _get_rps_progress_raw_cached(_client, scope, prodi_id):
             "koordinator_nip": r.get("koordinator_nip"),
             "status": _status_dari_rps_list(r.get("rps") or []),
         })
-
-    tahun_terbaru_per_prodi = {}
-    for r in semua_baris:
-        p, t = r["prodi_nama"], r["tahun_kurikulum"]
-        if t is not None and (p not in tahun_terbaru_per_prodi or t > tahun_terbaru_per_prodi[p]):
-            tahun_terbaru_per_prodi[p] = t
-
-    return [
-        r for r in semua_baris
-        if r["tahun_kurikulum"] == tahun_terbaru_per_prodi.get(r["prodi_nama"])
-    ]
+    return semua_baris
 
 
 def _peta_nama_pengguna(client):
@@ -252,13 +283,20 @@ def render_tabel_per_dosen(client, rows, tampilkan_peringatan_koordinator=True, 
     ke satu Prodi oleh pemanggil) + peringatan Mata Kuliah tanpa koordinator
     sama sekali - dipakai Kaprodi (Prodi sendiri) dan BPM/Admin (Prodi yang
     dipilih lewat dropdown)."""
-    peta_pengguna = _peta_nama_pengguna(client)
-    peta_whitelist = _peta_nama_whitelist(client)
+    # Baris dari statistik_pengisian_rps() sudah membawa nama koordinator
+    # (diterjemahkan di database, berlaku juga untuk BPM). Peta nama hanya
+    # diambil untuk baris dari cara lama (cadangan).
+    perlu_peta = any("koordinator_nama" not in r for r in rows)
+    peta_pengguna = _peta_nama_pengguna(client) if perlu_peta else {}
+    peta_whitelist = _peta_nama_whitelist(client) if perlu_peta else {}
 
     per_dosen = {}
     tanpa_koordinator = []
     for r in rows:
-        nama_koor = _nama_koordinator(r, peta_pengguna, peta_whitelist)
+        if "koordinator_nama" in r:
+            nama_koor = r["koordinator_nama"]
+        else:
+            nama_koor = _nama_koordinator(r, peta_pengguna, peta_whitelist)
         if nama_koor is None:
             tanpa_koordinator.append(f"{r['kode_mk']} - {r['nama_mk']}")
             continue

@@ -1568,3 +1568,11 @@ end;
 $$;
 
 grant execute on function public.sinkronkan_nama_pejabat() to authenticated;
+-- =============================================================================
+-- PAKET PERBAIKAN 1 (12 Nov 2026): ada di file terpisah, jalankan berurutan:
+--   1. sql/paket-perbaikan-1a-statistik.sql  (SEBELUM rilis aplikasi)
+--   2. sql/paket-perbaikan-1b-wajib-ai.sql   (SETELAH rilis aplikasi)
+--   Batal: sql/rollback-paket-perbaikan-1.sql
+-- CATATAN: file ini tertinggal dari database produksi (mis. kolom
+-- rps.dikunci_admin dan fungsi set_kunci_admin() tidak tercatat di sini).
+-- =============================================================================
